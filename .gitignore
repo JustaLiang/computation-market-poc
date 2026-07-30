@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# SQLite (dev databases)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Lightning secrets — never commit macaroons/certs
+*.macaroon
+*.cert
+tls.cert
+admin.macaroon
+
+# Environment
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
