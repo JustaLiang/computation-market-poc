@@ -22,9 +22,10 @@ path = "src/main.rs"
 # Portable GPU compute: Metal on macOS, Vulkan on NVIDIA/AMD, DX12 on Windows.
 # One WGSL kernel, every vendor. Native peak-throughput backends (cuBLAS, MLX,
 # rocBLAS) are added later behind Cargo features.
-wgpu = "22"
-pollster = "0.3"
+wgpu = "30"
+pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+half = { version = "2", features = ["bytemuck"] } # host-side fp16 for fp16 GEMM
 
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"

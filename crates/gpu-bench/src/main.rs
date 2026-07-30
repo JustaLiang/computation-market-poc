@@ -2,16 +2,16 @@
 //!
 //! ```text
 //! gpu-bench list                     # enumerate visible GPUs
-//! gpu-bench run                      # GEMM + bandwidth on the best GPU
+//! gpu-bench run                      # full suite (fp32 + fp16 GEMM + bandwidth)
 //! gpu-bench run --n 4096 --json      # bigger matmul, machine-readable output
+//! gpu-bench run --skip-fp16          # fp32 GEMM + bandwidth only
 //! ```
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use comfy_table::{Cell, Table};
-use serde::Serialize;
 
-use gpu_bench::{Backend, Precision, WgpuBackend};
+use gpu_bench::{run_suite, SuiteConfig, WgpuBackend};
 
 #[derive(Parser)]
 #[command(name = "gpu-bench", version, about = "Vendor-agnostic GPU benchmark")]
@@ -28,7 +28,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Run the benchmark suite on the highest-performance GPU.
+    /// Run the measurement suite on the highest-performance GPU.
     Run(RunArgs),
 }
 
@@ -43,37 +43,15 @@ struct RunArgs {
     /// Untimed warmup iterations.
     #[arg(long, default_value_t = 10)]
     warmup: u32,
-    /// GEMM precision.
-    #[arg(long, value_enum, default_value_t = Prec::F32)]
-    precision: Prec,
     /// Bandwidth test size, in millions of f32 elements per buffer.
     #[arg(long, default_value_t = 32)]
     bandwidth_m: u64,
+    /// Skip the fp16 GEMM (run fp32 + bandwidth only).
+    #[arg(long)]
+    skip_fp16: bool,
     /// Emit JSON instead of tables.
     #[arg(long)]
     json: bool,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Prec {
-    F32,
-    F16,
-}
-
-impl From<Prec> for Precision {
-    fn from(p: Prec) -> Self {
-        match p {
-            Prec::F32 => Precision::F32,
-            Prec::F16 => Precision::F16,
-        }
-    }
-}
-
-/// Combined machine-readable result for `run --json`.
-#[derive(Serialize)]
-struct RunReport {
-    gemm: gpu_bench::GemmResult,
-    bandwidth: gpu_bench::BandwidthResult,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -104,59 +82,93 @@ fn list(json: bool) -> anyhow::Result<()> {
 
 fn run(args: RunArgs) -> anyhow::Result<()> {
     let backend = WgpuBackend::new().context("initializing GPU backend")?;
-    let info = backend.device_info();
-
-    let gemm = backend
-        .gemm(args.n, args.precision.into(), args.warmup, args.iters)
-        .context("GEMM benchmark")?;
-    let bandwidth = backend
-        .bandwidth(args.bandwidth_m * 1_000_000, args.warmup, args.iters)
-        .context("bandwidth benchmark")?;
+    let cfg = SuiteConfig {
+        n: args.n,
+        iters: args.iters,
+        warmup: args.warmup,
+        bandwidth_elems: args.bandwidth_m * 1_000_000,
+        include_fp16: !args.skip_fp16,
+    };
+    let report = run_suite(&backend, &cfg).context("running benchmark suite")?;
 
     if args.json {
-        let report = RunReport { gemm, bandwidth };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
 
     println!(
         "Device:  {} ({}, {})",
-        info.name, info.backend, info.device_type
+        report.device.name, report.device.backend, report.device.device_type
     );
-    if !gemm.verified {
-        println!("WARNING: GEMM result failed verification — throughput is unreliable.");
-    }
 
     let mut table = Table::new();
     table.set_header(vec![
-        Cell::new("Metric"),
+        Cell::new("Measurement"),
         Cell::new("Value"),
         Cell::new("Detail"),
     ]);
+
+    // GEMM rows (fp32 always, fp16 when run).
+    for gemm in [report.gemm_fp32.as_ref(), report.gemm_fp16.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        table.add_row(vec![
+            Cell::new(format!("GEMM {}", gemm.precision.as_str())),
+            Cell::new(format!("{:.2} TFLOP/s", gemm.tflops)),
+            Cell::new(format!(
+                "n={}, {} iters, {:.3}s{}",
+                gemm.n,
+                gemm.iterations,
+                gemm.seconds,
+                if gemm.verified {
+                    ", verified"
+                } else {
+                    " — UNVERIFIED"
+                }
+            )),
+        ]);
+    }
+    if report.gemm_fp16.is_none() && !args.skip_fp16 {
+        table.add_row(vec![
+            Cell::new("GEMM fp16"),
+            Cell::new("n/a"),
+            Cell::new("not supported on this device"),
+        ]);
+    }
+
+    if let Some(bw) = &report.bandwidth {
+        table.add_row(vec![
+            Cell::new("Memory bandwidth"),
+            Cell::new(format!("{:.1} GB/s", bw.gb_per_s)),
+            Cell::new(format!(
+                "{:.0} MB/iter, {} iters, {:.3}s",
+                bw.bytes_per_iter as f64 / 1e6,
+                bw.iterations,
+                bw.seconds
+            )),
+        ]);
+    }
+
     table.add_row(vec![
-        Cell::new(format!("GEMM {}", gemm.precision.as_str())),
-        Cell::new(format!("{:.2} TFLOP/s", gemm.tflops)),
+        Cell::new("Network"),
+        Cell::new("reserved"),
+        Cell::new("not measured (needs a peer); reserved for the index"),
+    ]);
+
+    table.add_row(vec![
+        Cell::new("Compute index"),
+        Cell::new(format!("{:.1}", report.index.score)),
         Cell::new(format!(
-            "n={}, {} iters, {:.3}s{}",
-            gemm.n,
-            gemm.iterations,
-            gemm.seconds,
-            if gemm.verified { ", verified" } else { "" }
+            "compute {:.1} · memory {:.1} ({})",
+            report.index.compute_component, report.index.memory_component, report.index.note
         )),
     ]);
-    table.add_row(vec![
-        Cell::new("Memory bandwidth"),
-        Cell::new(format!("{:.1} GB/s", bandwidth.gb_per_s)),
-        Cell::new(format!(
-            "{:.0} MB/iter, {} iters, {:.3}s",
-            bandwidth.bytes_per_iter as f64 / 1e6,
-            bandwidth.iterations,
-            bandwidth.seconds
-        )),
-    ]);
+
     println!("{table}");
     println!(
-        "\nNote: portable ALU throughput (no tensor cores) — good for ranking, below vendor peak."
+        "\nNote: portable ALU throughput (no tensor cores) — good for ranking, below vendor peak.\
+         \n      Compute index is a provisional v0; references are placeholders, not calibrated."
     );
     Ok(())
 }

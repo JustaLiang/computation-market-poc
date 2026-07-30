@@ -19,7 +19,7 @@ use crate::backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, Precision
 /// 16×16 output tile per workgroup — matches `@workgroup_size(16, 16)` below.
 const TILE: u32 = 16;
 
-const GEMM_WGSL: &str = r#"
+const GEMM_F32_WGSL: &str = r#"
 struct Dims { n: u32, _p0: u32, _p1: u32, _p2: u32 };
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read>       a: array<f32>;
@@ -67,6 +67,60 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 }
 "#;
 
+// fp16 GEMM: inputs and shared tiles are f16 (half the memory traffic, and the
+// product runs on the GPU's f16 ALU), but the accumulator is f32 — the standard
+// "fp16 multiply, fp32 accumulate" mode. That keeps the all-ones result exact
+// (C = n) so verification holds at any n. Still no matrix/tensor-core path
+// (WGSL can't reach it), so this is faster than fp32 but below hardware peak.
+const GEMM_F16_WGSL: &str = r#"
+enable f16;
+struct Dims { n: u32, _p0: u32, _p1: u32, _p2: u32 };
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var<storage, read>       a: array<f16>;
+@group(0) @binding(2) var<storage, read>       b: array<f16>;
+@group(0) @binding(3) var<storage, read_write> c: array<f32>;
+
+const TILE: u32 = 16u;
+var<workgroup> tile_a: array<f16, 256>;
+var<workgroup> tile_b: array<f16, 256>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id)  lid: vec3<u32>) {
+    let n = dims.n;
+    let row = gid.y;
+    let col = gid.x;
+    var acc: f32 = 0.0;
+
+    let num_tiles = (n + TILE - 1u) / TILE;
+    for (var t = 0u; t < num_tiles; t = t + 1u) {
+        let a_col = t * TILE + lid.x;
+        let b_row = t * TILE + lid.y;
+
+        if (row < n && a_col < n) {
+            tile_a[lid.y * TILE + lid.x] = a[row * n + a_col];
+        } else {
+            tile_a[lid.y * TILE + lid.x] = f16(0.0);
+        }
+        if (b_row < n && col < n) {
+            tile_b[lid.y * TILE + lid.x] = b[b_row * n + col];
+        } else {
+            tile_b[lid.y * TILE + lid.x] = f16(0.0);
+        }
+        workgroupBarrier();
+
+        for (var i = 0u; i < TILE; i = i + 1u) {
+            acc = acc + f32(tile_a[lid.y * TILE + i] * tile_b[i * TILE + lid.x]);
+        }
+        workgroupBarrier();
+    }
+
+    if (row < n && col < n) {
+        c[row * n + col] = acc;
+    }
+}
+"#;
+
 // Grid-stride triad: each thread walks the array in strides of the total thread
 // count, so the workgroup count stays under the 65_535-per-dimension dispatch
 // limit no matter how large the buffer is, while every element is touched once.
@@ -100,51 +154,68 @@ pub struct WgpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
     info: DeviceInfo,
+    /// Whether `SHADER_F16` was available and enabled (gates fp16 GEMM).
+    f16_supported: bool,
 }
 
 impl WgpuBackend {
     /// Select the highest-performance adapter and open a device on it.
     pub fn new() -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
+            ..Default::default()
         }))
         .context("no GPU adapter found")?;
 
         let info = adapter_to_info(&adapter);
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("gpu-bench"),
-                required_features: wgpu::Features::empty(),
-                // Request the adapter's real limits so large benchmark buffers fit.
-                required_limits: adapter.limits(),
-                memory_hints: wgpu::MemoryHints::Performance,
-            },
-            None,
-        ))
+        // Enable fp16 shaders when the adapter offers them (Apple Silicon does).
+        let f16_supported = adapter.features().contains(wgpu::Features::SHADER_F16);
+        let required_features = if f16_supported {
+            wgpu::Features::SHADER_F16
+        } else {
+            wgpu::Features::empty()
+        };
+
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("gpu-bench"),
+            required_features,
+            // Request the adapter's real limits so large benchmark buffers fit.
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
         .context("failed to open GPU device")?;
 
         Ok(Self {
             device,
             queue,
             info,
+            f16_supported,
         })
     }
 
     /// Enumerate every GPU adapter visible to `wgpu`.
     pub fn list() -> Vec<DeviceInfo> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-        instance
-            .enumerate_adapters(wgpu::Backends::all())
+        let instance = wgpu::Instance::default();
+        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
             .iter()
             .map(adapter_to_info)
             .collect()
     }
 
     fn storage_buffer(&self, label: &str, data: &[f32]) -> wgpu::Buffer {
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            })
+    }
+
+    fn storage_buffer_f16(&self, label: &str, data: &[half::f16]) -> wgpu::Buffer {
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
@@ -179,7 +250,10 @@ impl WgpuBackend {
         }
         let start = Instant::now();
         self.queue.submit(Some(encoder.finish()));
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         start.elapsed().as_secs_f64()
     }
 
@@ -200,8 +274,13 @@ impl WgpuBackend {
 
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
-        let data = slice.get_mapped_range();
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| anyhow::anyhow!("failed to map readback buffer: {e:?}"))?;
         let value = bytemuck::cast_slice::<u8, f32>(&data)[0];
         drop(data);
         staging.unmap();
@@ -221,19 +300,29 @@ impl Backend for WgpuBackend {
         warmup: u32,
         iterations: u32,
     ) -> anyhow::Result<GemmResult> {
-        // fp16 needs the SHADER_F16 feature and packed 16-bit storage; that is
-        // the next increment. fp32 is the portable baseline.
-        anyhow::ensure!(
-            precision == Precision::F32,
-            "the wgpu backend currently supports only fp32 GEMM; fp16 is the next step"
-        );
         anyhow::ensure!(n > 0, "n must be > 0");
+        if precision == Precision::F16 {
+            anyhow::ensure!(
+                self.f16_supported,
+                "this device does not support SHADER_F16, so fp16 GEMM is unavailable"
+            );
+        }
 
         let elems = (n as usize) * (n as usize);
-        // A and B filled with 1.0 → every element of C must equal n. That makes
-        // verification a single comparison and needs no reference matmul.
-        let a = self.storage_buffer("a", &vec![1.0f32; elems]);
-        let b = self.storage_buffer("b", &vec![1.0f32; elems]);
+        // A and B filled with 1.0. The accumulator is f32 in both kernels, so
+        // every C element equals n exactly (n is representable, the sum stays
+        // exact) — verification is one comparison at any n or input precision.
+        let (a, b) = match precision {
+            Precision::F32 => (
+                self.storage_buffer("a", &vec![1.0f32; elems]),
+                self.storage_buffer("b", &vec![1.0f32; elems]),
+            ),
+            Precision::F16 => (
+                self.storage_buffer_f16("a", &vec![half::f16::ONE; elems]),
+                self.storage_buffer_f16("b", &vec![half::f16::ONE; elems]),
+            ),
+        };
+        // C is always f32 (the accumulator type), so readback is uniform.
         let c = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("c"),
             size: (elems * std::mem::size_of::<f32>()) as u64,
@@ -248,11 +337,15 @@ impl Backend for WgpuBackend {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
+        let shader = match precision {
+            Precision::F32 => GEMM_F32_WGSL,
+            Precision::F16 => GEMM_F16_WGSL,
+        };
         let module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gemm"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(GEMM_WGSL)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader)),
             });
         let pipeline = self
             .device
@@ -260,7 +353,7 @@ impl Backend for WgpuBackend {
                 label: Some("gemm"),
                 layout: None,
                 module: &module,
-                entry_point: "main",
+                entry_point: Some("main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
@@ -328,7 +421,7 @@ impl Backend for WgpuBackend {
                 label: Some("triad"),
                 layout: None,
                 module: &module,
-                entry_point: "main",
+                entry_point: Some("main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });

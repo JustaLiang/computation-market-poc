@@ -73,6 +73,19 @@ pub struct BandwidthResult {
     pub gb_per_s: f64,
 }
 
+/// Result of a network throughput/latency probe.
+///
+/// Reserved: not measured yet. It exists so the [`crate::suite::Report`] and the
+/// compute index already have a typed slot for network, which the SPEC's future
+/// "computation index" is meant to fold in. Measuring it needs a cooperating
+/// peer/server (iperf-style), which is out of scope for a local benchmark.
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkResult {
+    pub down_mbps: f64,
+    pub up_mbps: f64,
+    pub latency_ms: f64,
+}
+
 /// One benchmarkable device.
 pub trait Backend {
     fn device_info(&self) -> DeviceInfo;
