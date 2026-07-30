@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/host-agent",
+    "crates/gpu-bench",
+]
+
+# control-plane and vgpu are added as the build order (CLAUDE.md) reaches them.
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"

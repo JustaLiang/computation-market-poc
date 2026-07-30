@@ -1,0 +1,33 @@
+[package]
+name = "gpu-bench"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Vendor-agnostic GPU compute benchmark (fp GEMM throughput + memory bandwidth)."
+
+# An isolated benchmarking tool: it knows nothing about the marketplace. The
+# host-agent can later consume its library API to derive `dlperf` on an NVIDIA
+# host, but nothing here depends on rentals, Lightning, or the control plane.
+
+[lib]
+name = "gpu_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gpu-bench"
+path = "src/main.rs"
+
+[dependencies]
+# Portable GPU compute: Metal on macOS, Vulkan on NVIDIA/AMD, DX12 on Windows.
+# One WGSL kernel, every vendor. Native peak-throughput backends (cuBLAS, MLX,
+# rocBLAS) are added later behind Cargo features.
+wgpu = "22"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

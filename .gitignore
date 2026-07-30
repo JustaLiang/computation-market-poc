@@ -16,6 +16,10 @@
 tls.cert
 admin.macaroon
 
+# Host-agent runtime state — contains the issued agent bearer token
+vgpu-agent-state.json
+*-agent-state.json
+
 # Environment
 .env
 .env.local

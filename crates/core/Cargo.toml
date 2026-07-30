@@ -1,0 +1,24 @@
+# NB: the package is named `vgpu-core`, not `core`. A Cargo package named `core`
+# shadows Rust's built-in `core` crate in every dependent's extern prelude, which
+# breaks proc-macros that expand to `::core::…` paths (`#[tokio::main]`,
+# `#[derive(Parser)]`). The directory stays `crates/core` per CLAUDE.md; only the
+# package/import name changes. Imported as `vgpu_core`.
+[package]
+name = "vgpu-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# crates/core must stay dependency-light so the CLI (vgpu) and the host-agent do
+# not pull in sqlx. The sqlx `Type`/`FromRow` derives the control-plane needs are
+# gated behind the `sqlx` feature, off by default.
+[features]
+default = []
+sqlx = ["dep:sqlx"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"], optional = true }
