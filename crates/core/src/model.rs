@@ -40,6 +40,27 @@ impl RentalStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(self, RentalStatus::Stopped | RentalStatus::Failed)
     }
+
+    /// Lowercase wire/storage form — matches the serde and sqlx representations.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RentalStatus::Provisioning => "provisioning",
+            RentalStatus::Running => "running",
+            RentalStatus::Evicting => "evicting",
+            RentalStatus::Stopped => "stopped",
+            RentalStatus::Failed => "failed",
+        }
+    }
+
+    /// Every status, for building queries from [`Self::occupies_machine`] rather
+    /// than hardcoding status strings (CLAUDE.md).
+    pub const ALL: [RentalStatus; 5] = [
+        RentalStatus::Provisioning,
+        RentalStatus::Running,
+        RentalStatus::Evicting,
+        RentalStatus::Stopped,
+        RentalStatus::Failed,
+    ];
 }
 
 /// Storage medium backing a host's scratch disk (SPEC §3, `machines.disk_type`).

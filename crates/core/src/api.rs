@@ -129,6 +129,128 @@ pub struct PayoutResponse {
     pub paid_sats: i64,
 }
 
+// ---------------------------------------------------------------------------
+// Tenant API (SPEC §7): /offers, /accounts, /rentals, /health.
+// ---------------------------------------------------------------------------
+
+/// One row of `GET /offers` — an online, idle machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Offer {
+    pub machine_id: i64,
+    pub gpu_name: String,
+    pub gpu_count: i32,
+    pub vram_mb: i64,
+    pub cpu_name: String,
+    pub cpu_cores: i32,
+    pub ram_mb: i64,
+    pub disk_gb: i64,
+    pub disk_type: DiskType,
+    pub public_ip: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inet_down_mbps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inet_up_mbps: Option<f64>,
+    pub dlperf: f64,
+    pub rate_sats_per_min: i64,
+    /// Derived: `rate_sats_per_min * 60`.
+    pub rate_sats_per_hour: i64,
+}
+
+/// Response to `GET /offers`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OffersResponse {
+    pub offers: Vec<Offer>,
+}
+
+/// Response to `POST /accounts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateAccountResponse {
+    pub account_id: String,
+}
+
+/// Response to `GET /accounts/{id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountResponse {
+    pub account_id: String,
+    pub balance_sats: i64,
+    /// Sum of `rate_sats_per_min` over the account's running rentals.
+    pub burn_sats_per_min: i64,
+    /// `balance / burn`, or `null` when burn is zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runway_minutes: Option<i64>,
+}
+
+/// Body of `POST /accounts/{id}/deposit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DepositRequest {
+    pub sats: i64,
+}
+
+/// Response to `POST /accounts/{id}/deposit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DepositResponse {
+    pub bolt11: String,
+    pub payment_hash: String,
+    pub sats: i64,
+}
+
+/// Body of `POST /rentals`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRentalRequest {
+    pub machine_id: i64,
+    pub account_id: String,
+    pub image: String,
+    pub ssh_pubkey: String,
+}
+
+/// Response to `POST /rentals`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRentalResponse {
+    pub rental_id: i64,
+    pub status: RentalStatus,
+    pub rate_sats_per_min: i64,
+}
+
+/// Response to `GET /rentals/{id}`.
+///
+/// **Never** carries `ssh_pubkey` — the field is simply absent from this type,
+/// so omitting it is not something a handler has to remember (SPEC §7, CLAUDE.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RentalResponse {
+    pub id: i64,
+    pub machine_id: i64,
+    pub account_id: String,
+    pub image: String,
+    pub status: RentalStatus,
+    pub gpu_name: String,
+    pub gpu_count: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_port: Option<i32>,
+    /// Derived `ssh -p <port> root@<host>` when host and port are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_command: Option<String>,
+    pub rate_sats_per_min: i64,
+    pub sats_charged: i64,
+    pub minutes_billed: i64,
+    pub paid_through: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+}
+
+/// Response to `GET /health`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub ok: bool,
+    pub ln_backend: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
