@@ -14,6 +14,14 @@ pub mod backend;
 pub mod suite;
 pub mod wgpu_backend;
 
+/// Apple/MLX backend, behind the `mlx` feature. Placeholder until `mlx-rs` is
+/// wired up (needs `cmake`); see [`mlx_backend`].
+#[cfg(feature = "mlx")]
+pub mod mlx_backend;
+
 pub use backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, NetworkResult, Precision};
 pub use suite::{run_suite, ComputeIndex, Report, SuiteConfig};
 pub use wgpu_backend::WgpuBackend;
+
+#[cfg(feature = "mlx")]
+pub use mlx_backend::MlxBackend;

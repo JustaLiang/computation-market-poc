@@ -10,6 +10,15 @@ description = "Vendor-agnostic GPU compute benchmark (fp GEMM throughput + memor
 # host-agent can later consume its library API to derive `dlperf` on an NVIDIA
 # host, but nothing here depends on rentals, Lightning, or the control plane.
 
+[features]
+default = []
+# MLX backend for near-peak Apple-GPU numbers. Deferred: wiring the real `mlx-rs`
+# dependency needs `cmake` (it builds Apple's MLX C++ lib from source). Enabling
+# this feature today compiles only a placeholder that returns "not implemented".
+# To finish it: add mlx-rs as an optional dep and change this to
+#   mlx = ["dep:mlx-rs"]
+mlx = []
+
 [lib]
 name = "gpu_bench"
 path = "src/lib.rs"
