@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use comfy_table::{Cell, Table};
 
-use gpu_bench::{run_suite, SuiteConfig, WgpuBackend};
+use gpu_bench::{probe_network, run_suite, NetConfig, SuiteConfig, WgpuBackend};
 
 #[derive(Parser)]
 #[command(name = "gpu-bench", version, about = "Vendor-agnostic GPU benchmark")]
@@ -30,6 +30,10 @@ enum Cmd {
     },
     /// Run the measurement suite on the highest-performance GPU.
     Run(RunArgs),
+    /// Probe network down/up/latency against a public speedtest peer.
+    ///
+    /// Makes outbound HTTPS requests to speed.cloudflare.com.
+    Net(NetArgs),
 }
 
 #[derive(Args)]
@@ -49,7 +53,26 @@ struct RunArgs {
     /// Skip the fp16 GEMM (run fp32 + bandwidth only).
     #[arg(long)]
     skip_fp16: bool,
+    /// Also probe the network (outbound HTTPS) and fold it into the index.
+    #[arg(long)]
+    network: bool,
     /// Emit JSON instead of tables.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct NetArgs {
+    /// Download probe size, in megabytes.
+    #[arg(long, default_value_t = 25)]
+    down_mb: u64,
+    /// Upload probe size, in megabytes.
+    #[arg(long, default_value_t = 10)]
+    up_mb: u64,
+    /// Number of latency samples (best is reported).
+    #[arg(long, default_value_t = 5)]
+    latency_samples: u32,
+    /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
 }
@@ -58,7 +81,38 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::List { json } => list(json),
         Cmd::Run(args) => run(args),
+        Cmd::Net(args) => net(args),
     }
+}
+
+fn net(args: NetArgs) -> anyhow::Result<()> {
+    let cfg = NetConfig {
+        down_bytes: args.down_mb * 1_000_000,
+        up_bytes: args.up_mb * 1_000_000,
+        latency_samples: args.latency_samples,
+    };
+    let result = probe_network(&cfg).context("network probe")?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let mut table = Table::new();
+    table.set_header(vec![Cell::new("Metric"), Cell::new("Value")]);
+    table.add_row(vec![
+        Cell::new("Download"),
+        Cell::new(format!("{:.1} Mbps", result.down_mbps)),
+    ]);
+    table.add_row(vec![
+        Cell::new("Upload"),
+        Cell::new(format!("{:.1} Mbps", result.up_mbps)),
+    ]);
+    table.add_row(vec![
+        Cell::new("Latency"),
+        Cell::new(format!("{:.1} ms", result.latency_ms)),
+    ]);
+    println!("{table}");
+    println!("\nPeer: speed.cloudflare.com");
+    Ok(())
 }
 
 fn list(json: bool) -> anyhow::Result<()> {
@@ -88,6 +142,7 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
         warmup: args.warmup,
         bandwidth_elems: args.bandwidth_m * 1_000_000,
         include_fp16: !args.skip_fp16,
+        include_network: args.network,
     };
     let report = run_suite(&backend, &cfg).context("running benchmark suite")?;
 
@@ -150,11 +205,21 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
         ]);
     }
 
-    table.add_row(vec![
-        Cell::new("Network"),
-        Cell::new("reserved"),
-        Cell::new("not measured (needs a peer); reserved for the index"),
-    ]);
+    match &report.network {
+        Some(nw) => table.add_row(vec![
+            Cell::new("Network"),
+            Cell::new(format!("{:.0}↓ / {:.0}↑ Mbps", nw.down_mbps, nw.up_mbps)),
+            Cell::new(format!(
+                "latency {:.1} ms (speed.cloudflare.com)",
+                nw.latency_ms
+            )),
+        ]),
+        None => table.add_row(vec![
+            Cell::new("Network"),
+            Cell::new("reserved"),
+            Cell::new("not measured; pass --network to include"),
+        ]),
+    };
 
     table.add_row(vec![
         Cell::new("Compute index"),

@@ -22,6 +22,8 @@ pub struct SuiteConfig {
     pub bandwidth_elems: u64,
     /// Run the fp16 GEMM in addition to fp32 (skipped if unsupported).
     pub include_fp16: bool,
+    /// Probe the network (outbound HTTPS to a speedtest peer). Off by default.
+    pub include_network: bool,
 }
 
 impl Default for SuiteConfig {
@@ -32,6 +34,7 @@ impl Default for SuiteConfig {
             warmup: 10,
             bandwidth_elems: 32_000_000,
             include_fp16: true,
+            include_network: false,
         }
     }
 }
@@ -65,6 +68,7 @@ pub struct ComputeIndex {
 // Provisional reference points — placeholders, NOT calibrated to real hardware.
 const REF_TFLOPS: f64 = 100.0; // stand-in for a strong accelerator's portable GEMM
 const REF_GBPS: f64 = 1000.0; // stand-in for high-end HBM bandwidth
+const REF_MBPS: f64 = 1000.0; // stand-in for a 1 Gbps downlink
 const W_COMPUTE: f64 = 0.7;
 const W_MEMORY: f64 = 0.3;
 
@@ -92,9 +96,22 @@ pub fn run_suite(backend: &dyn Backend, cfg: &SuiteConfig) -> anyhow::Result<Rep
 
     let bandwidth = Some(backend.bandwidth(cfg.bandwidth_elems, cfg.warmup, cfg.iters)?);
 
+    let network = if cfg.include_network {
+        match crate::network::probe(&crate::network::NetConfig::default()) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                eprintln!("note: network probe skipped ({e})");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let index = compute_index(
         gemm_fp16.as_ref().or(gemm_fp32.as_ref()),
         bandwidth.as_ref(),
+        network.as_ref(),
     );
 
     Ok(Report {
@@ -102,22 +119,49 @@ pub fn run_suite(backend: &dyn Backend, cfg: &SuiteConfig) -> anyhow::Result<Rep
         gemm_fp32,
         gemm_fp16,
         bandwidth,
-        network: None,
+        network,
         index,
     })
 }
 
-/// Blend the best available GEMM and bandwidth into the provisional index.
-fn compute_index(gemm: Option<&GemmResult>, bandwidth: Option<&BandwidthResult>) -> ComputeIndex {
+/// Blend the best GEMM, bandwidth, and (if measured) network into the index.
+///
+/// Weights shift when network is present, so an index computed with `--network`
+/// is only comparable to another computed the same way — expected for a v0.
+fn compute_index(
+    gemm: Option<&GemmResult>,
+    bandwidth: Option<&BandwidthResult>,
+    network: Option<&NetworkResult>,
+) -> ComputeIndex {
     let compute_component = gemm.map_or(0.0, |g| 100.0 * g.tflops / REF_TFLOPS);
     let memory_component = bandwidth.map_or(0.0, |b| 100.0 * b.gb_per_s / REF_GBPS);
-    let score = W_COMPUTE * compute_component + W_MEMORY * memory_component;
+    let network_component = network.map(|nw| 100.0 * nw.down_mbps / REF_MBPS);
+
+    let (w_compute, w_memory, w_network, note) = if network_component.is_some() {
+        (
+            0.5,
+            0.2,
+            0.3,
+            "provisional v0 (uncalibrated): compute·0.5 + memory·0.2 + network·0.3",
+        )
+    } else {
+        (
+            W_COMPUTE,
+            W_MEMORY,
+            0.0,
+            "provisional v0 (uncalibrated): compute·0.7 + memory·0.3; network reserved",
+        )
+    };
+    let score = w_compute * compute_component
+        + w_memory * memory_component
+        + w_network * network_component.unwrap_or(0.0);
+
     ComputeIndex {
         score,
         compute_component,
         memory_component,
-        network_component: None,
-        note: "provisional v0: placeholder references, uncalibrated; network reserved",
+        network_component,
+        note,
     }
 }
 
@@ -149,28 +193,45 @@ mod tests {
         }
     }
 
+    fn net(down_mbps: f64) -> NetworkResult {
+        NetworkResult {
+            down_mbps,
+            up_mbps: 0.0,
+            latency_ms: 0.0,
+        }
+    }
+
     #[test]
     fn index_blends_components_by_weight() {
         // 100 TFLOPS == 100% of ref; 1000 GB/s == 100% of ref → score 100.
-        let idx = compute_index(Some(&gemm(100.0)), Some(&bw(1000.0)));
+        let idx = compute_index(Some(&gemm(100.0)), Some(&bw(1000.0)), None);
         assert!((idx.compute_component - 100.0).abs() < 1e-9);
         assert!((idx.memory_component - 100.0).abs() < 1e-9);
         assert!((idx.score - 100.0).abs() < 1e-9);
+        assert!(idx.network_component.is_none());
     }
 
     #[test]
     fn index_weights_compute_more_than_memory() {
         // Pure compute at ref vs pure memory at ref: compute must score higher.
-        let compute_only = compute_index(Some(&gemm(100.0)), Some(&bw(0.0)));
-        let memory_only = compute_index(Some(&gemm(0.0)), Some(&bw(1000.0)));
+        let compute_only = compute_index(Some(&gemm(100.0)), Some(&bw(0.0)), None);
+        let memory_only = compute_index(Some(&gemm(0.0)), Some(&bw(1000.0)), None);
         assert!(compute_only.score > memory_only.score);
         assert!((compute_only.score - 70.0).abs() < 1e-9);
         assert!((memory_only.score - 30.0).abs() < 1e-9);
     }
 
     #[test]
+    fn index_includes_network_when_present() {
+        // All three at reference → 0.5·100 + 0.2·100 + 0.3·100 = 100.
+        let idx = compute_index(Some(&gemm(100.0)), Some(&bw(1000.0)), Some(&net(1000.0)));
+        assert!((idx.network_component.unwrap() - 100.0).abs() < 1e-9);
+        assert!((idx.score - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn index_handles_missing_measurements() {
-        let idx = compute_index(None, None);
+        let idx = compute_index(None, None, None);
         assert_eq!(idx.score, 0.0);
         assert!(idx.network_component.is_none());
     }

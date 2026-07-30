@@ -11,6 +11,7 @@
 //! side; nothing here depends on it.
 
 pub mod backend;
+pub mod network;
 pub mod suite;
 pub mod wgpu_backend;
 
@@ -20,6 +21,7 @@ pub mod wgpu_backend;
 pub mod mlx_backend;
 
 pub use backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, NetworkResult, Precision};
+pub use network::{probe as probe_network, NetConfig};
 pub use suite::{run_suite, ComputeIndex, Report, SuiteConfig};
 pub use wgpu_backend::WgpuBackend;
 
