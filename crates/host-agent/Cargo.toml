@@ -15,8 +15,7 @@ vgpu-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 clap = { version = "4", features = ["derive", "env"] }
-bollard = "0.17"
-futures-util = "0.3"
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -27,8 +26,11 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 sysinfo = "0.32"
 
-# NVML exists only on NVIDIA-capable hosts (Linux/Windows). GPU hosting is Linux,
-# so we compile the crate only there and provide a graceful fallback elsewhere —
-# this keeps the agent buildable on a dev machine (e.g. macOS) with no CUDA stack.
+# Linux is the real GPU-hosting tier: NVML for inventory, bollard + futures-util
+# for the Docker runtime. These compile only on Linux; macOS gets the Metal
+# inventory (system_profiler) and a runtime stub, so no Docker/CUDA stack is
+# needed to build and register on a dev machine.
 [target.'cfg(target_os = "linux")'.dependencies]
 nvml-wrapper = "0.10"
+bollard = "0.17"
+futures-util = "0.3"

@@ -58,9 +58,9 @@ crates/
     migrations/0001_init.sql
     tests/lifecycle.rs     acceptance test from SPEC §10
   host-agent/              binary `vgpu-agent`
-    src/main.rs            register, heartbeat, dispatch
-    src/runtime.rs         ALL container code (bollard). see below.
-    src/benchmark.rs       NVML inventory, dlperf, fingerprint
+    src/main.rs            register, heartbeat, dispatch (holds dyn HostRuntime)
+    src/runtime.rs         HostRuntime trait: Docker (Linux) + Mac backends
+    src/benchmark.rs       NVML (Linux) / Metal (macOS) inventory, dlperf, fingerprint
   gpu-bench/               binary + lib: standalone vendor-agnostic GPU benchmark
                            (wgpu fp32/fp16 GEMM + bandwidth + network + index).
                            Isolated from the marketplace; the agent can consume
@@ -220,6 +220,13 @@ gpu-bench run                             # real measured GPU numbers on that ho
 - **`gpu-bench` crate added** — a standalone GPU benchmark, isolated from the
   marketplace. The fp16 GEMM in `host-agent/src/benchmark.rs` is still the SPEC §6
   name-lookup fallback; real measurement lives in `gpu-bench` (or a CUDA build).
+- **Host agent is two-platform** behind a `HostRuntime` trait chosen by target
+  OS: Linux = Docker + NVML (the real host tier); macOS = Metal/`system_profiler`
+  inventory + a runtime **stub** that registers and benchmarks but refuses to
+  launch (Apple Silicon has no container-GPU passthrough or microVM). Same
+  `vgpu-agent` binary, flags, and protocol — only `benchmark.rs`/`runtime.rs`
+  differ. A Mac appears in `/offers`; renting it reports `failed` with the
+  isolation reason.
 
 ## Deliberate gaps
 

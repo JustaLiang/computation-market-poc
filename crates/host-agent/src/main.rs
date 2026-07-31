@@ -25,7 +25,7 @@ use vgpu_core::api::{
 };
 use vgpu_core::model::{DiskType, RentalStatus};
 
-use crate::runtime::{RentalSpec, Runtime};
+use crate::runtime::{HostRuntime, RentalSpec};
 
 /// Must stay below the control plane's `HEARTBEAT_TIMEOUT` (SPEC §5, 90s), or a
 /// healthy host is marked offline and its billing clock stops.
@@ -226,7 +226,7 @@ async fn ensure_ok(resp: reqwest::Response) -> anyhow::Result<reqwest::Response>
 
 /// Execute one queued command and report the outcome. Runs as its own task so a
 /// slow image pull never stalls the heartbeat loop.
-async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<Runtime>, cmd: Command) {
+async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<dyn HostRuntime>, cmd: Command) {
     let report = match cmd {
         Command::StartRental {
             rental_id,
@@ -370,11 +370,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to Docker only after registering — the machine is a valid offer as
     // soon as it is known, and command dispatch is what needs the runtime.
-    let rt = Arc::new(
-        Runtime::connect(args.port_start, args.port_end)
+    let rt: Arc<dyn HostRuntime> = Arc::from(
+        runtime::connect(args.port_start, args.port_end)
             .await
-            .context("connecting to the container runtime")?,
+            .context("connecting to the host runtime")?,
     );
+
+    // Reconcile on startup: what is already running, and how much is free.
+    let running = rt.running_rentals().await.map(|r| r.len()).unwrap_or(0);
+    let free = rt.available().await.map(|p| p.len()).unwrap_or(0);
+    tracing::info!(running, free_ports = free, "host runtime connected");
 
     tracing::info!(
         interval_secs = args.heartbeat_secs,

@@ -89,10 +89,65 @@ fn inventory() -> anyhow::Result<Vec<GpuInfo>> {
     Ok(gpus)
 }
 
-/// Off-host fallback so the agent still builds and runs on a dev machine.
-#[cfg(not(target_os = "linux"))]
+/// macOS (Apple Silicon): inventory via `system_profiler` (no NVML). Apple GPUs
+/// have no NVML UUID/PCI id, so we synthesize a stable, swap-sensitive
+/// fingerprint id from the machine serial + GPU core count, and report unified
+/// memory as the VRAM figure.
+#[cfg(target_os = "macos")]
 fn inventory() -> anyhow::Result<Vec<GpuInfo>> {
-    anyhow::bail!("NVML/GPU inventory is only available on Linux hosts");
+    let out = std::process::Command::new("system_profiler")
+        .args(["SPDisplaysDataType", "-json"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("running system_profiler: {e}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "system_profiler SPDisplaysDataType failed"
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let gpu = value["SPDisplaysDataType"]
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| anyhow::anyhow!("no GPU reported by system_profiler"))?;
+
+    let name = gpu["_name"].as_str().unwrap_or("Apple GPU").to_string();
+    let cores = gpu["sppci_cores"]
+        .as_str()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    let id = mac_serial().unwrap_or_else(|| name.clone());
+
+    Ok(vec![GpuInfo {
+        name,
+        uuid: format!("apple-gpu-{id}"),
+        pci_bus_id: cores.map(|c| format!("{c}-core")).unwrap_or_default(),
+        vram_mb: apple_unified_memory_mb(),
+    }])
+}
+
+#[cfg(target_os = "macos")]
+fn mac_serial() -> Option<String> {
+    let out = std::process::Command::new("system_profiler")
+        .args(["SPHardwareDataType", "-json"])
+        .output()
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    value["SPHardwareDataType"][0]["serial_number"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Apple Silicon has unified memory; report total system RAM as the VRAM proxy.
+#[cfg(target_os = "macos")]
+fn apple_unified_memory_mb() -> i64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    (sys.total_memory() / (1024 * 1024)) as i64
+}
+
+/// Off-host fallback so the agent still builds on other dev platforms.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn inventory() -> anyhow::Result<Vec<GpuInfo>> {
+    anyhow::bail!("GPU inventory is available only on Linux (NVML) and macOS hosts");
 }
 
 /// `hw_fingerprint`: SHA-256 over the **sorted** set of
@@ -177,6 +232,11 @@ fn lookup_dlperf(name: &str) -> f64 {
     ];
 
     let lname = name.to_lowercase();
+    // Apple Silicon uses its own table — and this guard avoids false matches
+    // with old NVIDIA Tesla "M40"/"M2090" names.
+    if lname.contains("apple") {
+        return apple_dlperf(&lname);
+    }
     for (needle, score) in TABLE {
         if lname.contains(needle) {
             return *score;
@@ -186,6 +246,35 @@ fn lookup_dlperf(name: &str) -> f64 {
     // enough that misrepresenting it as premium hardware is unattractive.
     tracing::warn!(gpu = %name, "unknown GPU model, using fallback dlperf");
     18.0
+}
+
+/// Apple Silicon `dlperf`, on the same 4090≈42 scale — integrated GPUs land well
+/// below datacenter parts. Rough estimates; most specific variant first (so
+/// "m4 max" is not captured by "m4"). Only reached for names containing "apple".
+fn apple_dlperf(lname: &str) -> f64 {
+    const TABLE: &[(&str, f64)] = &[
+        ("m3 ultra", 13.0),
+        ("m2 ultra", 11.0),
+        ("m1 ultra", 10.0),
+        ("m4 max", 9.0),
+        ("m3 max", 8.0),
+        ("m2 max", 7.0),
+        ("m1 max", 6.0),
+        ("m4 pro", 6.0),
+        ("m3 pro", 5.0),
+        ("m2 pro", 4.5),
+        ("m1 pro", 4.0),
+        ("m4", 4.0),
+        ("m3", 3.0),
+        ("m2", 2.5),
+        ("m1", 2.0),
+    ];
+    for (needle, score) in TABLE {
+        if lname.contains(needle) {
+            return *score;
+        }
+    }
+    3.0 // unknown Apple GPU
 }
 
 #[cfg(test)]
@@ -245,6 +334,15 @@ mod tests {
     #[test]
     fn unknown_gpu_gets_conservative_fallback() {
         assert_eq!(lookup_dlperf("Some Future GPU 9999"), 18.0);
+    }
+
+    #[test]
+    fn apple_silicon_uses_its_own_table() {
+        // "M4 Max" must not be captured by the bare "m4" row.
+        assert_eq!(lookup_dlperf("Apple M4 Max"), 9.0);
+        assert_eq!(lookup_dlperf("Apple M4"), 4.0);
+        // An Apple GPU ranks below a 4090 and never false-matches the NVIDIA table.
+        assert!(lookup_dlperf("Apple M1") < lookup_dlperf("NVIDIA GeForce RTX 4090"));
     }
 
     #[test]
