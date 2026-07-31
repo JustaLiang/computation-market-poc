@@ -6,7 +6,12 @@ Rust implementation of a GPU rental marketplace with Lightning payments.
 (data model, API, algorithms, acceptance test). `docs/BACKGROUND.md` explains why
 the design is what it is; consult it before proposing architectural changes.
 
-Nothing is implemented yet. This file describes the target.
+**Status: implemented.** All crates build; `cargo test --workspace` is green,
+including the SPEC §10 acceptance test (`crates/control-plane/tests/lifecycle.rs`,
+which asserts `SUM(ledger.delta_sats) == 0`). The marketplace runs end to end on
+the mock Lightning backend — see "Running" below. The only remaining gap is
+`LndRest` (real Lightning, build step 9), which is a stub. This file still
+describes the target; where the code deviates, it is noted under "Deviations".
 
 ## Stack
 
@@ -31,29 +36,36 @@ except payments.
 ## Workspace layout
 
 ```
-Cargo.toml                 workspace
+Cargo.toml                 workspace (core, control-plane, host-agent, gpu-bench, vgpu)
 crates/
-  core/                    shared types. no I/O, no axum, no sqlx queries.
+  core/                    package `vgpu-core` (NOT `core`: a crate named `core`
+                           shadows libcore and breaks proc-macros in binaries).
+                           Imported as `vgpu_core`. No I/O; sqlx derives behind
+                           the `sqlx` feature so clients stay dependency-light.
     src/money.rs           Sats newtype
-    src/model.rs           Machine, Account, Rental, RentalStatus, LedgerKind
-    src/api.rs             request/response DTOs shared by server and clients
-  control-plane/           binary: axum server
-    src/main.rs            wiring, config, router
+    src/model.rs           RentalStatus, DiskType, LedgerKind (enums)
+    src/api.rs             request/response DTOs (agent + tenant), shared
+  control-plane/           binary + lib (lib so the acceptance test drives it)
+    src/lib.rs             build_router()
+    src/main.rs            wiring, config, ticker
+    src/state.rs           AppState, BillingConfig, Clock (injectable)
+    src/error.rs           ApiError -> HTTP
     src/routes/agent.rs    /agent/*
-    src/routes/tenant.rs   /offers, /accounts, /rentals
+    src/routes/tenant.rs   /offers, /accounts, /rentals, /health
     src/billing.rs         ticker: invoices, metering, eviction, liveness
-    src/lightning/mod.rs   LightningBackend trait
-    src/lightning/mock.rs
-    src/lightning/lnd.rs
-    src/db.rs              pool, migrations, ledger writes
-    migrations/
-  host-agent/              binary
+    src/lightning/{mod,mock,lnd}.rs   LightningBackend trait + backends
+    src/db.rs              pool, migrations, row types, ledger writes
+    migrations/0001_init.sql
+    tests/lifecycle.rs     acceptance test from SPEC §10
+  host-agent/              binary `vgpu-agent`
     src/main.rs            register, heartbeat, dispatch
-    src/runtime.rs         ALL container code. see below.
-    src/benchmark.rs       NVML inventory, fp16 GEMM score, fingerprint
-  vgpu/                    binary: tenant CLI
-tests/
-  lifecycle.rs             acceptance test from SPEC §10
+    src/runtime.rs         ALL container code (bollard). see below.
+    src/benchmark.rs       NVML inventory, dlperf, fingerprint
+  gpu-bench/               binary + lib: standalone vendor-agnostic GPU benchmark
+                           (wgpu fp32/fp16 GEMM + bandwidth + network + index).
+                           Isolated from the marketplace; the agent can consume
+                           it to derive dlperf later.
+  vgpu/                    binary: tenant CLI (BTC/USD formatting lives here)
 ```
 
 `crates/core` must stay dependency-light so the CLI doesn't pull in sqlx.
@@ -154,6 +166,9 @@ binding a real port — faster and no flakiness.
 
 Build in this order; each step is independently testable.
 
+**Status:** steps 1–8 are done and the acceptance test is green. Only step 9
+(`LndRest`) remains — `LN_BACKEND=lnd` errors today; use `mock`.
+
 1. `core`: `Sats`, `RentalStatus`, model structs, API DTOs.
 2. `control-plane`: migrations, pool, `db::record`.
 3. `lightning`: trait + `MockBackend`.
@@ -166,6 +181,45 @@ Build in this order; each step is independently testable.
 
 Steps 1–7 need no GPU and no container runtime. Get the acceptance test green
 before touching `host-agent`.
+
+## Running
+
+Hardware-free, mock Lightning (no GPU, no Docker, no node):
+
+```bash
+# server
+LN_BACKEND=mock control-plane            # binds 127.0.0.1:8080
+
+# tenant (another shell) — vgpu talks to the tenant API
+vgpu offers
+vgpu create-account
+vgpu deposit <acct> 6000                  # mock invoice settles on the next tick
+vgpu rent --machine-id <id> --account-id <acct> --image <img> --ssh-key "<pubkey>"
+vgpu rental <id>                          # shows the derived ssh command
+```
+
+On a Linux + NVIDIA host with Docker + the NVIDIA Container Toolkit, the real
+host agent registers (becomes an offer), heartbeats, and runs containers:
+
+```bash
+vgpu-agent --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 60
+gpu-bench run                             # real measured GPU numbers on that host
+```
+
+## Deviations from this document
+
+- **`core` is the package `vgpu-core`** (imported `vgpu_core`). A Cargo package
+  literally named `core` shadows Rust's built-in `core` and breaks
+  `#[tokio::main]`/`#[derive(...)]` in binaries. The directory stays `crates/core`.
+- **Runtime-checked sqlx** (`query`/`query_as`), not the compile-time `query!`
+  macro, so builds need no live `DATABASE_URL`. `migrate!` still embeds the schema.
+- **Injectable `Clock`** on `AppState` (`System` | `Manual`) so the acceptance
+  test advances time deterministically instead of sleeping.
+- **`register` marks the machine online** with a fresh heartbeat, so a freshly
+  registered host lists in `/offers` immediately (SPEC §10 step 2).
+- **`gpu-bench` crate added** — a standalone GPU benchmark, isolated from the
+  marketplace. The fp16 GEMM in `host-agent/src/benchmark.rs` is still the SPEC §6
+  name-lookup fallback; real measurement lives in `gpu-bench` (or a CUDA build).
 
 ## Deliberate gaps
 
