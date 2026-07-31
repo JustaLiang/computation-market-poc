@@ -392,11 +392,28 @@ mod mac {
     use super::{pick_free_port, HostRuntime, RentalSpec, RunningRental, Started};
 
     /// An allowlisted, host-controlled MLX task. The tenant supplies only
-    /// *parameters* (via the rental image, e.g. `mlx:gemm:2048`), never code —
-    /// that bounded surface is the isolation model.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// *parameters* (via the rental image), never code — that bounded surface is
+    /// the isolation model.
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum MlxTask {
+        /// fp16 GEMM loop — a GPU-time benchmark workload. `mlx:gemm[:N]`.
         Gemm { n: u32 },
+        /// `mlx-lm` text generation, served OpenAI-compatibly on the port.
+        /// `mlx:generate:<hf-model-id>` (e.g. mlx-community/Llama-3.2-1B-Instruct-4bit).
+        Generate { model: String },
+    }
+
+    /// A Hugging Face model id is safe to pass as a bare argument: `org/name`,
+    /// conservative charset, no path traversal. (We pass it as an argv, never
+    /// through a shell.) `mlx-community/*` repos are MLX-format weights + config —
+    /// data, not code.
+    fn valid_model_id(s: &str) -> bool {
+        !s.is_empty()
+            && !s.contains("..")
+            && s.split('/').count() == 2
+            && s.split('/').all(|seg| !seg.is_empty())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
     }
 
     /// Parse a rental image into an allowlisted task. Rejects anything that is
@@ -404,14 +421,17 @@ mod mac {
     fn parse_task(image: &str) -> anyhow::Result<MlxTask> {
         let rest = image.strip_prefix("mlx:").ok_or_else(|| {
             anyhow::anyhow!(
-                "this host runs MLX jobs only — set image to 'mlx:gemm[:N]' (got {image:?})"
+                "this host runs MLX jobs only — image must be 'mlx:gemm[:N]' or \
+                 'mlx:generate:<model>' (got {image:?})"
             )
         })?;
-        let mut parts = rest.split(':');
-        match parts.next() {
-            Some("gemm") | Some("selftest") => {
-                let n = parts
-                    .next()
+        let (task, arg) = match rest.split_once(':') {
+            Some((t, a)) => (t, Some(a)),
+            None => (rest, None),
+        };
+        match task {
+            "gemm" | "selftest" => {
+                let n = arg
                     .map(str::parse::<u32>)
                     .transpose()
                     .map_err(|_| anyhow::anyhow!("invalid GEMM size in {image:?}"))?
@@ -419,7 +439,19 @@ mod mac {
                 anyhow::ensure!((256..=16384).contains(&n), "GEMM size out of range: {n}");
                 Ok(MlxTask::Gemm { n })
             }
-            other => anyhow::bail!("unknown MLX task {other:?}; supported: gemm"),
+            "generate" => {
+                let model = arg.ok_or_else(|| {
+                    anyhow::anyhow!("missing model: use 'mlx:generate:<hf-model-id>'")
+                })?;
+                anyhow::ensure!(
+                    valid_model_id(model),
+                    "invalid model id {model:?}; expected 'org/name' (e.g. mlx-community/…)"
+                );
+                Ok(MlxTask::Generate {
+                    model: model.to_string(),
+                })
+            }
+            other => anyhow::bail!("unknown MLX task {other:?}; supported: gemm, generate"),
         }
     }
 
@@ -429,12 +461,14 @@ mod mac {
     }
 
     /// Runs host-controlled MLX jobs as child processes of a configured Python
-    /// (`VGPU_MLX_PYTHON`, default `python3`) that must have `mlx` installed. The
-    /// bundled worker is the only code that ever runs.
+    /// (`VGPU_MLX_PYTHON`, default `python3`). Only host-controlled code ever
+    /// runs: the bundled GEMM worker, or `mlx_lm.server` for generation. `gemm`
+    /// needs `mlx`; `generate` needs `mlx-lm`.
     pub struct MlxRuntime {
         python: String,
         script_path: PathBuf,
         mlx_available: bool,
+        mlx_lm_available: bool,
         port_start: i32,
         port_end: i32,
         jobs: Mutex<HashMap<i64, Job>>,
@@ -490,17 +524,28 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
                 .with_context(|| format!("writing MLX worker to {}", script_path.display()))?
                 .write_all(MLX_WORKER.as_bytes())?;
 
-            // Probe MLX so rentals fail early — but the host still registers.
+            // Probe capabilities so rentals fail early — the host still registers.
             let mlx_available = std::process::Command::new(&python)
                 .args(["-c", "import mlx.core"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            let mlx_lm_available = std::process::Command::new(&python)
+                .args(["-c", "import mlx_lm"])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if !mlx_available {
                 tracing::warn!(
                     python = %python,
-                    "MLX unavailable (import mlx.core failed); host registers but rentals fail \
-                     until `pip install mlx` in that Python"
+                    "MLX unavailable (import mlx.core failed); host registers but `mlx:gemm` \
+                     rentals fail until `pip install mlx` in that Python"
+                );
+            }
+            if !mlx_lm_available {
+                tracing::warn!(
+                    python = %python,
+                    "mlx-lm unavailable; `mlx:generate` rentals fail until `pip install mlx-lm`"
                 );
             }
 
@@ -508,6 +553,7 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
                 python,
                 script_path,
                 mlx_available,
+                mlx_lm_available,
                 port_start,
                 port_end,
                 jobs: Mutex::new(HashMap::new()),
@@ -522,30 +568,61 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
                 .map(|j| j.port)
                 .collect()
         }
+
+        /// Build the child command for a task. Only host-controlled programs are
+        /// spawned; the tenant's input reaches them only as validated arguments.
+        fn build_command(&self, task: &MlxTask, port: i32) -> tokio::process::Command {
+            let mut cmd = tokio::process::Command::new(&self.python);
+            match task {
+                MlxTask::Gemm { n } => {
+                    cmd.arg(&self.script_path)
+                        .arg(n.to_string())
+                        .arg(port.to_string());
+                }
+                MlxTask::Generate { model } => {
+                    // mlx-lm's OpenAI-compatible server; model is a validated id.
+                    cmd.arg("-m")
+                        .arg("mlx_lm.server")
+                        .arg("--model")
+                        .arg(model)
+                        .arg("--host")
+                        .arg("0.0.0.0")
+                        .arg("--port")
+                        .arg(port.to_string());
+                }
+            }
+            cmd
+        }
     }
 
     #[async_trait]
     impl HostRuntime for MlxRuntime {
         async fn start_rental(&self, spec: RentalSpec) -> anyhow::Result<Started> {
-            let MlxTask::Gemm { n } = parse_task(&spec.image)?;
-            anyhow::ensure!(
-                self.mlx_available,
-                "MLX runtime unavailable: `import mlx.core` failed for {} (pip install mlx)",
-                self.python
-            );
+            let task = parse_task(&spec.image)?;
+            match &task {
+                MlxTask::Gemm { .. } => anyhow::ensure!(
+                    self.mlx_available,
+                    "MLX unavailable: `import mlx.core` failed for {} (pip install mlx)",
+                    self.python
+                ),
+                MlxTask::Generate { .. } => anyhow::ensure!(
+                    self.mlx_lm_available,
+                    "mlx-lm unavailable: `import mlx_lm` failed for {} (pip install mlx-lm)",
+                    self.python
+                ),
+            }
 
             let used = self.used_ports();
             let port = pick_free_port(self.port_start, self.port_end, &used).ok_or_else(|| {
                 anyhow::anyhow!("no free port in {}..={}", self.port_start, self.port_end)
             })?;
 
-            // Spawn is synchronous; the worker runs the GEMM loop + status HTTP.
-            let child = tokio::process::Command::new(&self.python)
-                .arg(&self.script_path)
-                .arg(n.to_string())
-                .arg(port.to_string())
+            // Spawn is synchronous. gemm runs the bundled worker; generate runs
+            // mlx-lm's OpenAI-compatible server on the port.
+            let child = self
+                .build_command(&task, port)
                 .spawn()
-                .with_context(|| format!("spawning MLX worker via {}", self.python))?;
+                .with_context(|| format!("spawning MLX job via {}", self.python))?;
 
             self.jobs
                 .lock()
@@ -554,7 +631,7 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
 
             Ok(Started {
                 container_id: format!("mlx-job-{}", spec.rental_id),
-                ssh_port: port, // the MLX status endpoint, not SSH
+                ssh_port: port, // gemm: status endpoint; generate: OpenAI API
             })
         }
 
@@ -617,6 +694,24 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
         #[test]
         fn rejects_out_of_range_size() {
             assert!(parse_task("mlx:gemm:1").is_err());
+        }
+
+        #[test]
+        fn parses_generate_model() {
+            assert_eq!(
+                parse_task("mlx:generate:mlx-community/Llama-3.2-1B-Instruct-4bit").unwrap(),
+                MlxTask::Generate {
+                    model: "mlx-community/Llama-3.2-1B-Instruct-4bit".to_string()
+                }
+            );
+        }
+
+        #[test]
+        fn generate_requires_a_valid_model() {
+            assert!(parse_task("mlx:generate").is_err()); // no model
+            assert!(parse_task("mlx:generate:not-a-repo").is_err()); // no '/'
+            assert!(parse_task("mlx:generate:../etc/passwd").is_err()); // traversal
+            assert!(parse_task("mlx:generate:a/b/c").is_err()); // too many segments
         }
     }
 }

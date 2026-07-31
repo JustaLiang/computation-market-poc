@@ -223,10 +223,11 @@ gpu-bench run                             # real measured GPU numbers on that ho
 - **Host agent is two-platform** behind a `HostRuntime` trait chosen by target
   OS: Linux = Docker + NVML (the real host tier); macOS = Metal/`system_profiler`
   inventory + an **MLX-only** runtime — the host runs an allowlisted,
-  host-controlled MLX fp16 GEMM job (image `mlx:gemm[:N]`), never tenant code, as
-  the isolation model in lieu of a microVM (needs a Python with `mlx`, via
-  `VGPU_MLX_PYTHON`). Same `vgpu-agent` binary, flags, and protocol — only
-  `benchmark.rs`/`runtime.rs` differ.
+  host-controlled MLX program (image `mlx:gemm[:N]` = fp16 GEMM loop, or
+  `mlx:generate:<model>` = `mlx_lm.server` OpenAI-compatible inference), never
+  tenant code, as the isolation model in lieu of a microVM (needs a Python with
+  `mlx`/`mlx-lm`, via `VGPU_MLX_PYTHON`). Same `vgpu-agent` binary, flags, and
+  protocol — only `benchmark.rs`/`runtime.rs` differ.
 
 ## Deliberate gaps
 

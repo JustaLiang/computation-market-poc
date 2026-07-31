@@ -104,23 +104,33 @@ The **same `vgpu-agent` binary** runs on macOS behind a `HostRuntime` trait: it
 inventories via Metal/`system_profiler`, benchmarks, registers (a Mac shows up in
 `vgpu offers` as e.g. `Apple M4 Max`), and lends compute as an **MLX-only** tier.
 The isolation model is an allowlist, not a shell: the tenant supplies only
-*parameters* (the rental image is `mlx:gemm[:N]`), and the host runs a fixed,
-host-controlled MLX fp16 GEMM job on the Apple GPU — never tenant code — exposing
-a status endpoint with live throughput.
+*parameters* (the rental image), never code. The host runs one of a fixed set of
+host-controlled programs:
 
-Needs a Python with `mlx`:
+- `mlx:gemm[:N]` — an fp16 GEMM loop on the Apple GPU with a live-throughput
+  status endpoint.
+- `mlx:generate:<hf-model-id>` — `mlx_lm.server` (OpenAI-compatible LLM inference)
+  on the mapped port; the tenant picks a model, not code.
 
 ```bash
-python3 -m venv .mlx && .mlx/bin/pip install mlx
+python3 -m venv .mlx && .mlx/bin/pip install mlx mlx-lm
 VGPU_MLX_PYTHON="$PWD/.mlx/bin/python" vgpu-agent \
-  --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 3
-# tenant:
+  --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 5
+
+# tenant — rent GPU time (GEMM benchmark, live TFLOP/s):
 vgpu rent --machine-id <id> --account-id <acct> --image mlx:gemm:2048 --ssh-key unused
-curl http://<host>:<port>/        # {"task":"gemm-fp16","tflops": …} — live
+curl http://<host>:<port>/
+
+# tenant — rent an LLM inference endpoint:
+vgpu rent --machine-id <id> --account-id <acct> \
+  --image mlx:generate:mlx-community/Llama-3.2-1B-Instruct-4bit --ssh-key unused
+curl http://<host>:<port>/v1/chat/completions -H content-type:application/json \
+  -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":40}'
 ```
 
 Arbitrary containers + SSH are the Linux tier; on macOS a non-`mlx:` image is
-rejected. See `crates/host-agent/src/runtime.rs`.
+rejected. The port is an HTTP endpoint (not SSH). See
+`crates/host-agent/src/runtime.rs`.
 
 ## gpu-bench (standalone)
 
