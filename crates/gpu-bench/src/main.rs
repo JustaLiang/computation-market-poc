@@ -7,9 +7,12 @@
 //! gpu-bench run --skip-fp16          # fp32 GEMM + bandwidth only
 //! ```
 
+use std::time::Duration;
+
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use comfy_table::{Cell, Table};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use gpu_bench::{probe_network, run_suite, NetConfig, SuiteConfig, WgpuBackend};
 
@@ -140,7 +143,19 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
         bandwidth_elems: args.bandwidth_m * 1_000_000,
         include_fp16: !args.skip_fp16,
     };
-    let report = run_suite(&backend, &cfg).context("running benchmark suite")?;
+    // Animated spinner on stderr while the (multi-second) suite runs; the label
+    // tracks the current phase. Cleared before results, so it never pollutes the
+    // table or `--json` on stdout.
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap());
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner.set_message("benchmarking…");
+
+    let report = run_suite(&backend, &cfg, |phase| {
+        spinner.set_message(format!("benchmarking: {phase}…"))
+    })
+    .context("running benchmark suite")?;
+    spinner.finish_and_clear();
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);

@@ -38,6 +38,7 @@ half = { version = "2", features = ["bytemuck"] } # host-side fp16 for fp16 GEMM
 
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
+indicatif = "0.17" # spinner while the (multi-second) suite runs
 ureq = "2" # lightweight blocking HTTP for the (opt-in) network probe
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

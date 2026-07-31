@@ -50,12 +50,21 @@ pub struct Report {
 /// fp32 GEMM and bandwidth are required (an error fails the suite). fp16 and the
 /// network probe are best-effort: on failure they are recorded as `None` and
 /// noted, not fatal.
-pub fn run_suite(backend: &dyn Backend, cfg: &SuiteConfig) -> anyhow::Result<Report> {
+///
+/// `on_phase` is called with a short label before each (blocking) phase, so a
+/// caller can drive a spinner. Pass `|_| {}` if you don't care.
+pub fn run_suite(
+    backend: &dyn Backend,
+    cfg: &SuiteConfig,
+    mut on_phase: impl FnMut(&str),
+) -> anyhow::Result<Report> {
     let device = backend.device_info();
 
+    on_phase("fp32 GEMM");
     let gemm_fp32 = Some(backend.gemm(cfg.n, Precision::F32, cfg.warmup, cfg.iters)?);
 
     let gemm_fp16 = if cfg.include_fp16 {
+        on_phase("fp16 GEMM");
         match backend.gemm(cfg.n, Precision::F16, cfg.warmup, cfg.iters) {
             Ok(r) => Some(r),
             Err(e) => {
@@ -67,9 +76,11 @@ pub fn run_suite(backend: &dyn Backend, cfg: &SuiteConfig) -> anyhow::Result<Rep
         None
     };
 
+    on_phase("memory bandwidth");
     let bandwidth = Some(backend.bandwidth(cfg.bandwidth_elems, cfg.warmup, cfg.iters)?);
 
     // Network is always part of the suite (best-effort — offline is not fatal).
+    on_phase("network probe");
     let network = match crate::network::probe(&crate::network::NetConfig::default()) {
         Ok(n) => Some(n),
         Err(e) => {
