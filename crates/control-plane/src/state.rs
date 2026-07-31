@@ -8,11 +8,13 @@ use sqlx::SqlitePool;
 
 use crate::lightning::LightningBackend;
 
-/// Billing timing (SPEC §5). Held on state, never a `const`, so it has exactly
-/// one definition and the acceptance test can compress `bill_period` to 2s.
+/// Billing timing. Held on state, never a `const`, so it has one definition and
+/// the acceptance test can compress the intervals. Charging is per-rental at
+/// stop (`elapsed × rate`, in `agent::report`), so there is no bill period:
+/// `tick` is just the cadence of invoice polling, offline-marking, and the
+/// budget/eviction check.
 #[derive(Clone)]
 pub struct BillingConfig {
-    pub bill_period: Duration,
     pub tick: Duration,
     pub heartbeat_timeout: Duration,
 }
@@ -20,7 +22,6 @@ pub struct BillingConfig {
 impl Default for BillingConfig {
     fn default() -> Self {
         Self {
-            bill_period: Duration::from_secs(60),
             tick: Duration::from_secs(5),
             heartbeat_timeout: Duration::from_secs(90),
         }
@@ -28,9 +29,6 @@ impl Default for BillingConfig {
 }
 
 impl BillingConfig {
-    pub fn bill_period_secs(&self) -> i64 {
-        self.bill_period.as_secs() as i64
-    }
     pub fn heartbeat_timeout_secs(&self) -> i64 {
         self.heartbeat_timeout.as_secs() as i64
     }

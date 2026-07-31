@@ -52,7 +52,8 @@ crates/
     src/error.rs           ApiError -> HTTP
     src/routes/agent.rs    /agent/*
     src/routes/tenant.rs   /offers, /accounts, /rentals, /health
-    src/billing.rs         ticker: invoices, metering, eviction, liveness
+    src/billing.rs         ticker: invoices, liveness, budget/eviction (charge
+                           itself is at stop, in routes/agent.rs report)
     src/lightning/{mod,mock,lnd}.rs   LightningBackend trait + backends
     src/db.rs              pool, migrations, row types, ledger writes
     migrations/0001_init.sql
@@ -90,19 +91,18 @@ everywhere. Make it unrepresentable to get wrong:
 `Stopped`, `Failed`. Add `fn occupies_machine(&self) -> bool` returning true for
 the first three, and use it in the offer query. Do not compare status strings.
 
-**`BillingConfig` in app state, not a `const`.** SPEC requires `BILL_PERIOD` to
-have exactly one definition, and the acceptance test needs it compressed to 2s.
-A struct on `AppState` satisfies both:
+**`BillingConfig` in app state, not a `const`.** Timing lives on `AppState` (one
+definition) so the acceptance test can compress the intervals. Billing is
+charge-at-stop (see Deviations), so there is no `bill_period`:
 
 ```rust
 pub struct BillingConfig {
-    pub bill_period: Duration,      // default 60s
-    pub tick: Duration,             // default 5s
+    pub tick: Duration,             // default 5s — ticker cadence
     pub heartbeat_timeout: Duration // default 90s
 }
 ```
 
-Both the ticker and rental creation read it from state. Never hardcode 60.
+Never hardcode these intervals; read them from state.
 
 **Rental creation needs a real write lock.** `sqlx`'s `begin()` issues a deferred
 `BEGIN` on SQLite, which can fail with `SQLITE_BUSY` on upgrade and would allow
@@ -250,6 +250,21 @@ gpu-bench run                             # real measured GPU numbers on that ho
   current producer (it was the removed `mlx:generate` inference endpoint).
   `ssh_command` is still populated for the `ssh` kind; `kind` defaults to `ssh`,
   so the acceptance test is unchanged.
+- **Billing is charge-at-stop, not metered per period (deviates from SPEC §5).**
+  On-chain/Lightning settlement has a per-payment cost, so charging every
+  `BILL_PERIOD` is wasteful. Instead a rental is billed **once**, when it first
+  reaches a terminal state (`routes/agent.rs` report handler), for
+  `(ended_at − created_at) × rate ÷ 60` whole sats (`billing::accrued_charge`;
+  truncated, never rounded up, capped at the account balance so it can't go
+  negative). Nothing is charged at rent (creation only gates on the account
+  being funded for ≥ 1 minute). The ticker no longer moves money for rentals:
+  `billing::enforce_budgets` only *evicts* a running rental whose accrued cost
+  has outrun its balance (queues `stop_rental`, so the one stop-time charge then
+  settles it). `BILL_PERIOD`/`paid_through` are gone; the `paid_through` column
+  remains (always 0) only to keep the `RentalResponse` DTO stable. The
+  double-entry invariant is unchanged — one `record_charge` per rental, still
+  `SUM(ledger.delta_sats) == 0`. The acceptance test (`tests/lifecycle.rs`) drives
+  this model and adds `evicts_when_balance_cannot_cover_elapsed`.
 - **`ssh_pubkey` is optional for the HTTP-status tier.** SPEC §7 lists
   `ssh_pubkey` as a required `POST /rentals` field, but the `metal:` (native
   Metal) tier runs a host-controlled job that never consumes it, so requiring a

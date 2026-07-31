@@ -11,7 +11,7 @@ use vgpu_core::api::{
 };
 use vgpu_core::model::LedgerKind;
 
-use crate::db::{self, MachineRow};
+use crate::db::{self, MachineRow, RentalRow};
 use crate::error::ApiError;
 use crate::routes::{authenticate, new_agent_token};
 use crate::state::AppState;
@@ -172,34 +172,84 @@ pub async fn report(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let machine = authenticate(&state, &headers).await?;
 
-    let owns: Option<(i64,)> = sqlx::query_as("SELECT id FROM rentals WHERE id=? AND machine_id=?")
+    let rental: RentalRow = sqlx::query_as("SELECT * FROM rentals WHERE id=? AND machine_id=?")
         .bind(req.rental_id)
         .bind(machine.id)
         .fetch_optional(&state.pool)
-        .await?;
-    if owns.is_none() {
-        return Err(ApiError::not_found("no such rental for this machine"));
-    }
+        .await?
+        .ok_or_else(|| ApiError::not_found("no such rental for this machine"))?;
 
     let now = state.clock.now();
-    let ended_at: Option<i64> = req.status.is_terminal().then_some(now);
+    let terminal = req.status.is_terminal();
+    let ended_at: Option<i64> = terminal.then_some(now);
+    // Bill the whole rental once, when a still-live rental first reaches a
+    // terminal state — for `(ended_at − created_at) × rate` (charge-at-stop).
+    // Re-reports of an already-terminal rental never re-charge.
+    let settle = terminal && !rental.status.is_terminal();
 
-    sqlx::query(
-        "UPDATE rentals SET status=?, kind=COALESCE(?, kind), ssh_host=?, ssh_port=?, \
-         container_id=COALESCE(?, container_id), error=?, ended_at=COALESCE(?, ended_at) WHERE id=?",
-    )
-    .bind(req.status)
-    .bind(req.kind)
-    .bind(machine.public_ip.as_str())
-    .bind(req.ssh_port)
-    .bind(req.container_id.as_deref())
-    .bind(req.error.as_deref())
-    .bind(ended_at)
-    .bind(req.rental_id)
-    .execute(&state.pool)
-    .await?;
+    let mut conn = db::begin_immediate(&state.pool).await?;
+    let res = async {
+        sqlx::query(
+            "UPDATE rentals SET status=?, kind=COALESCE(?, kind), ssh_host=?, ssh_port=?, \
+             container_id=COALESCE(?, container_id), error=?, ended_at=COALESCE(?, ended_at) WHERE id=?",
+        )
+        .bind(req.status)
+        .bind(req.kind)
+        .bind(machine.public_ip.as_str())
+        .bind(req.ssh_port)
+        .bind(req.container_id.as_deref())
+        .bind(req.error.as_deref())
+        .bind(ended_at)
+        .bind(req.rental_id)
+        .execute(&mut *conn)
+        .await?;
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+        if settle {
+            let accrued =
+                crate::billing::accrued_charge(rental.created_at, now, rental.rate_sats_per_min);
+            let balance: i64 = sqlx::query_scalar("SELECT balance_sats FROM accounts WHERE id=?")
+                .bind(&rental.account_id)
+                .fetch_one(&mut *conn)
+                .await?;
+            // Custodial: never debit below zero. The ticker's eviction valve
+            // normally keeps the balance ample; this cap is the backstop.
+            let charge = accrued.min(balance);
+            if charge > 0 {
+                sqlx::query("UPDATE accounts SET balance_sats = balance_sats - ? WHERE id=?")
+                    .bind(charge)
+                    .bind(&rental.account_id)
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("UPDATE machines SET payout_balance = payout_balance + ? WHERE id=?")
+                    .bind(charge)
+                    .bind(machine.id)
+                    .execute(&mut *conn)
+                    .await?;
+                db::record_charge(&mut conn, now, &rental.account_id, machine.id, rental.id, charge)
+                    .await?;
+            }
+            let minutes = (now - rental.created_at).max(0) / 60;
+            sqlx::query("UPDATE rentals SET sats_charged=?, minutes_billed=? WHERE id=?")
+                .bind(charge)
+                .bind(minutes)
+                .bind(rental.id)
+                .execute(&mut *conn)
+                .await?;
+        }
+        Ok::<_, ApiError>(())
+    }
+    .await;
+
+    match res {
+        Ok(()) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
 }
 
 /// `POST /agent/rate` — update the machine's price. Live rentals are unaffected

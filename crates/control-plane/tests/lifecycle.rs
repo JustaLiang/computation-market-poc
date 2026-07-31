@@ -1,7 +1,10 @@
 //! Acceptance test — the full lifecycle from SPEC §10, with no GPU, no container
 //! runtime, and no Lightning node: a mock LN backend that settles immediately, a
-//! manual clock so time advances deterministically, and `BILL_PERIOD` compressed
-//! to 2s. The router is driven with `oneshot` — no real port, no flakiness.
+//! manual clock so time advances deterministically, and the ticker intervals
+//! compressed. The router is driven with `oneshot` — no real port, no flakiness.
+//!
+//! Billing is charge-at-stop: nothing is metered per period; the whole rental is
+//! billed once, at stop, for `(ended_at − created_at) × rate`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,17 +49,37 @@ async fn call(
     (status, value)
 }
 
+/// The register body for a stock host, parameterized only by rate.
+fn register_body(rate: i64) -> Value {
+    json!({
+        "host_id": "host-1",
+        "gpu_name": "NVIDIA GeForce RTX 4090",
+        "gpu_count": 1,
+        "vram_mb": 24564,
+        "cpu_name": "AMD Ryzen 9",
+        "cpu_cores": 16,
+        "ram_mb": 64000,
+        "disk_gb": 1000,
+        "disk_type": "nvme",
+        "public_ip": "203.0.113.5",
+        "port_start": 40000,
+        "port_end": 40099,
+        "dlperf": 42.0,
+        "rate_sats_per_min": rate,
+        "hw_fingerprint": "fp-abc"
+    })
+}
+
 #[tokio::test]
 async fn full_lifecycle() {
     const RATE: i64 = 10; // sats/min
-    const DEPOSIT: i64 = 30; // exactly three periods
+    const DEPOSIT: i64 = 30; // exactly three minutes' worth
 
     let pool = db::connect("sqlite::memory:", 1).await.unwrap();
     let state = AppState {
         pool,
         ln: Arc::new(MockBackend::new(Duration::ZERO)), // settles immediately
         billing: BillingConfig {
-            bill_period: Duration::from_secs(2), // compressed
             tick: Duration::from_secs(1),
             heartbeat_timeout: Duration::from_secs(90),
         },
@@ -70,23 +93,7 @@ async fn full_lifecycle() {
         &app,
         Method::POST,
         "/agent/register",
-        Some(json!({
-            "host_id": "host-1",
-            "gpu_name": "NVIDIA GeForce RTX 4090",
-            "gpu_count": 1,
-            "vram_mb": 24564,
-            "cpu_name": "AMD Ryzen 9",
-            "cpu_cores": 16,
-            "ram_mb": 64000,
-            "disk_gb": 1000,
-            "disk_type": "nvme",
-            "public_ip": "203.0.113.5",
-            "port_start": 40000,
-            "port_end": 40099,
-            "dlperf": 42.0,
-            "rate_sats_per_min": RATE,
-            "hw_fingerprint": "fp-abc"
-        })),
+        Some(register_body(RATE)),
         None,
     )
     .await;
@@ -131,7 +138,8 @@ async fn full_lifecycle() {
     .await;
     assert_eq!(body["balance_sats"].as_i64().unwrap(), DEPOSIT);
 
-    // 4. Rental created → first minute charged up front, before any container.
+    // 4. Rental created → NOT charged up front (charge-at-stop). Balance stays
+    //    put; sats_charged/minutes_billed are zero until the rental stops.
     let (st, body) = call(
         &app,
         Method::POST,
@@ -158,7 +166,11 @@ async fn full_lifecycle() {
         None,
     )
     .await;
-    assert_eq!(acct["balance_sats"].as_i64().unwrap(), DEPOSIT - RATE);
+    assert_eq!(
+        acct["balance_sats"].as_i64().unwrap(),
+        DEPOSIT,
+        "nothing billed up front"
+    );
 
     let (_, rental) = call(
         &app,
@@ -168,8 +180,8 @@ async fn full_lifecycle() {
         None,
     )
     .await;
-    assert_eq!(rental["sats_charged"].as_i64().unwrap(), RATE);
-    assert_eq!(rental["minutes_billed"].as_i64().unwrap(), 1);
+    assert_eq!(rental["sats_charged"].as_i64().unwrap(), 0);
+    assert_eq!(rental["minutes_billed"].as_i64().unwrap(), 0);
     assert!(
         rental.get("ssh_pubkey").is_none(),
         "ssh_pubkey must never leave the API"
@@ -235,41 +247,22 @@ async fn full_lifecycle() {
     let (_, body) = call(&app, Method::GET, "/offers", None, None).await;
     assert_eq!(body["offers"].as_array().unwrap().len(), 0);
 
-    // 7. Ticker drains the balance one period at a time; evicts at zero;
-    //    balance never goes negative; sats_charged equals the deposit.
-    let mut expected_balance = DEPOSIT - RATE; // 20 after the up-front charge
-    for _ in 0..2 {
-        state.clock.advance(2); // reach the next paid_through
-        control_plane::billing::tick(&state).await.unwrap();
-        expected_balance -= RATE;
-        let (_, acct) = call(
-            &app,
-            Method::GET,
-            &format!("/accounts/{account_id}"),
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(acct["balance_sats"].as_i64().unwrap(), expected_balance);
-        assert!(
-            acct["balance_sats"].as_i64().unwrap() >= 0,
-            "balance never negative"
-        );
-    }
-    // Balance is now 0; the next period cannot be paid → eviction.
-    state.clock.advance(2);
-    control_plane::billing::tick(&state).await.unwrap();
-
-    let (_, rental) = call(
+    // 7. Three minutes pass. The ticker no longer bills per period: the balance
+    //    is untouched and nothing is charged yet. A fresh heartbeat keeps the
+    //    host live so the budget check runs; accrued (30) == balance (30), which
+    //    is within budget, so there is no eviction.
+    state.clock.advance(180);
+    let (_, hb) = call(
         &app,
-        Method::GET,
-        &format!("/rentals/{rental_id}"),
-        None,
-        None,
+        Method::POST,
+        "/agent/heartbeat",
+        Some(json!({ "online": true })),
+        Some(&token),
     )
     .await;
-    assert_eq!(rental["status"].as_str().unwrap(), "evicting");
-    assert_eq!(rental["sats_charged"].as_i64().unwrap(), DEPOSIT);
+    assert_eq!(hb["commands"].as_array().unwrap().len(), 0);
+    control_plane::billing::tick(&state).await.unwrap();
+
     let (_, acct) = call(
         &app,
         Method::GET,
@@ -278,9 +271,36 @@ async fn full_lifecycle() {
         None,
     )
     .await;
-    assert_eq!(acct["balance_sats"].as_i64().unwrap(), 0);
+    assert_eq!(
+        acct["balance_sats"].as_i64().unwrap(),
+        DEPOSIT,
+        "no periodic charge"
+    );
+    let (_, rental) = call(
+        &app,
+        Method::GET,
+        &format!("/rentals/{rental_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(rental["sats_charged"].as_i64().unwrap(), 0);
 
-    // 8. stop_rental delivered; agent reports stopped; machine re-listed.
+    // Tenant stops the rental → transitions to evicting, stop_rental queued.
+    let (st, body) = call(
+        &app,
+        Method::DELETE,
+        &format!("/rentals/{rental_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "delete rental: {body}");
+    assert_eq!(body["status"].as_str().unwrap(), "evicting");
+
+    // 8. stop_rental delivered; agent reports stopped → the single stop-time
+    //    charge lands: 3 min × 10 = 30 sats, draining the balance to zero and
+    //    crediting the host. The machine is idle again and re-listed.
     let (_, hb) = call(
         &app,
         Method::POST,
@@ -303,6 +323,27 @@ async fn full_lifecycle() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+
+    let (_, rental) = call(
+        &app,
+        Method::GET,
+        &format!("/rentals/{rental_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(rental["status"].as_str().unwrap(), "stopped");
+    assert_eq!(rental["sats_charged"].as_i64().unwrap(), DEPOSIT); // 3 min × 10
+    assert_eq!(rental["minutes_billed"].as_i64().unwrap(), 3);
+    let (_, acct) = call(
+        &app,
+        Method::GET,
+        &format!("/accounts/{account_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(acct["balance_sats"].as_i64().unwrap(), 0);
 
     let (_, body) = call(&app, Method::GET, "/offers", None, None).await;
     assert_eq!(
@@ -336,4 +377,160 @@ async fn full_lifecycle() {
         .await
         .unwrap();
     assert_eq!(ledger_sum, 0, "SUM(ledger.delta_sats) must be 0");
+}
+
+/// The stop-time model still protects the host: a rental that outruns its
+/// balance is evicted by the ticker (no money moves there), and the stop-time
+/// charge is then capped at the balance — the account hits zero, never negative.
+#[tokio::test]
+async fn evicts_when_balance_cannot_cover_elapsed() {
+    const RATE: i64 = 10; // sats/min
+    const DEPOSIT: i64 = 20; // only two minutes' worth
+
+    let pool = db::connect("sqlite::memory:", 1).await.unwrap();
+    let state = AppState {
+        pool,
+        ln: Arc::new(MockBackend::new(Duration::ZERO)),
+        billing: BillingConfig {
+            tick: Duration::from_secs(1),
+            heartbeat_timeout: Duration::from_secs(90),
+        },
+        clock: Clock::manual(1_000_000),
+        ln_backend_name: "mock".to_string(),
+    };
+    let app = control_plane::build_router(state.clone());
+
+    let (_, body) = call(
+        &app,
+        Method::POST,
+        "/agent/register",
+        Some(register_body(RATE)),
+        None,
+    )
+    .await;
+    let machine_id = body["machine_id"].as_i64().unwrap();
+    let token = body["agent_token"].as_str().unwrap().to_string();
+
+    let (_, body) = call(&app, Method::POST, "/accounts", None, None).await;
+    let account_id = body["account_id"].as_str().unwrap().to_string();
+    call(
+        &app,
+        Method::POST,
+        &format!("/accounts/{account_id}/deposit"),
+        Some(json!({ "sats": DEPOSIT })),
+        None,
+    )
+    .await;
+    control_plane::billing::tick(&state).await.unwrap();
+
+    // Rent and start.
+    let (_, body) = call(
+        &app,
+        Method::POST,
+        "/rentals",
+        Some(json!({
+            "machine_id": machine_id,
+            "account_id": account_id,
+            "image": "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
+            "ssh_pubkey": "ssh-ed25519 AAAA"
+        })),
+        None,
+    )
+    .await;
+    let rental_id = body["rental_id"].as_i64().unwrap();
+    call(
+        &app,
+        Method::POST,
+        "/agent/heartbeat",
+        Some(json!({ "online": true })),
+        Some(&token),
+    )
+    .await;
+    call(
+        &app,
+        Method::POST,
+        "/agent/report",
+        Some(json!({
+            "rental_id": rental_id,
+            "status": "running",
+            "ssh_port": 40000,
+            "container_id": "abc"
+        })),
+        Some(&token),
+    )
+    .await;
+
+    // Run past the funded window: accrued = 3 min × 10 = 30 > balance 20.
+    state.clock.advance(180);
+    call(
+        &app,
+        Method::POST,
+        "/agent/heartbeat",
+        Some(json!({ "online": true })),
+        Some(&token),
+    )
+    .await;
+    control_plane::billing::tick(&state).await.unwrap();
+
+    // Evicted — but not yet charged (money moves only at stop).
+    let (_, rental) = call(
+        &app,
+        Method::GET,
+        &format!("/rentals/{rental_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(rental["status"].as_str().unwrap(), "evicting");
+    let (_, acct) = call(
+        &app,
+        Method::GET,
+        &format!("/accounts/{account_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(acct["balance_sats"].as_i64().unwrap(), DEPOSIT);
+
+    // Agent stops → charge capped at the balance: account hits zero, not negative.
+    call(
+        &app,
+        Method::POST,
+        "/agent/heartbeat",
+        Some(json!({ "online": true })),
+        Some(&token),
+    )
+    .await;
+    call(
+        &app,
+        Method::POST,
+        "/agent/report",
+        Some(json!({ "rental_id": rental_id, "status": "stopped" })),
+        Some(&token),
+    )
+    .await;
+
+    let (_, rental) = call(
+        &app,
+        Method::GET,
+        &format!("/rentals/{rental_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(rental["status"].as_str().unwrap(), "stopped");
+    assert_eq!(
+        rental["sats_charged"].as_i64().unwrap(),
+        DEPOSIT,
+        "charge capped at balance"
+    );
+    let (_, acct) = call(
+        &app,
+        Method::GET,
+        &format!("/accounts/{account_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(acct["balance_sats"].as_i64().unwrap(), 0, "never negative");
 }

@@ -2,8 +2,9 @@
 
 A **GPU rental marketplace** with **Bitcoin/Lightning** payments, in Rust.
 Providers list a GPU host and set one price in sats/min; tenants deposit
-over Lightning, rent by the minute (billed in advance), and are evicted at zero
-balance. The control plane is a rendezvous + accounting service — **not** a proxy;
+over Lightning and rent by the minute, billed once at stop for the time used
+(`elapsed × rate`), with over-running rentals evicted before the balance goes
+negative. The control plane is a rendezvous + accounting service — **not** a proxy;
 workload traffic (SSH, or an HTTP endpoint for Metal jobs) goes straight to the host.
 
 Normative behaviour lives in [`docs/SPEC.md`](docs/SPEC.md); the "why" is in
@@ -45,9 +46,9 @@ cargo build --release        # binaries land in target/release/
 
 ## Quickstart — the whole marketplace, hardware-free
 
-No GPU, no Docker, no Lightning node. Invoices auto-settle; the billing period is
-compressed only in the acceptance test (here it's the default 60s, but the mock
-settles deposits immediately).
+No GPU, no Docker, no Lightning node. The mock backend settles deposit invoices
+immediately; a rental is billed once, at stop, for the time it ran. The ticker
+intervals are compressed only in the acceptance test.
 
 **Terminal 1 — the server:**
 ```bash

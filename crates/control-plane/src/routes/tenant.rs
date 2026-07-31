@@ -209,7 +209,6 @@ pub async fn create_rental(
     Json(req): Json<CreateRentalRequest>,
 ) -> Result<(StatusCode, Json<CreateRentalResponse>), ApiError> {
     let now = state.clock.now();
-    let period = state.billing.bill_period_secs();
 
     let mut conn = db::begin_immediate(&state.pool).await?;
     let outcome = async {
@@ -260,42 +259,23 @@ pub async fn create_rental(
             ));
         }
 
-        let paid_through = now + period;
+        // Charge-at-stop: nothing is billed up front. The account just has to be
+        // funded — at least one minute at the machine's rate — so a broke tenant
+        // can't occupy a machine for free. The single charge lands at stop
+        // (`POST /agent/report` → terminal) for `(ended_at − created_at) × rate`;
+        // `sats_charged`, `minutes_billed`, `paid_through` keep their DEFAULT 0.
         let rental_id: i64 = sqlx::query_scalar(
             "INSERT INTO rentals (machine_id, account_id, image, ssh_pubkey, status, \
-             rate_sats_per_min, sats_charged, minutes_billed, paid_through, created_at) \
-             VALUES (?, ?, ?, ?, 'provisioning', ?, ?, 1, ?, ?) RETURNING id",
+             rate_sats_per_min, created_at) \
+             VALUES (?, ?, ?, ?, 'provisioning', ?, ?) RETURNING id",
         )
         .bind(req.machine_id)
         .bind(&req.account_id)
         .bind(&req.image)
         .bind(&ssh_pubkey)
         .bind(rate)
-        .bind(rate)
-        .bind(paid_through)
         .bind(now)
         .fetch_one(&mut *conn)
-        .await?;
-
-        sqlx::query("UPDATE accounts SET balance_sats = balance_sats - ? WHERE id=?")
-            .bind(rate)
-            .bind(&req.account_id)
-            .execute(&mut *conn)
-            .await?;
-        sqlx::query("UPDATE machines SET payout_balance = payout_balance + ? WHERE id=?")
-            .bind(rate)
-            .bind(req.machine_id)
-            .execute(&mut *conn)
-            .await?;
-
-        db::record_charge(
-            &mut conn,
-            now,
-            &req.account_id,
-            req.machine_id,
-            rental_id,
-            rate,
-        )
         .await?;
 
         let payload = serde_json::to_string(&Command::StartRental {
