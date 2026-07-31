@@ -8,7 +8,7 @@ use vgpu_core::api::{
     AccountResponse, Command, CreateAccountResponse, CreateRentalRequest, CreateRentalResponse,
     DepositRequest, DepositResponse, HealthResponse, Offer, OffersResponse, RentalResponse,
 };
-use vgpu_core::model::{RentalKind, RentalStatus};
+use vgpu_core::model::{is_http_status_image, RentalKind, RentalStatus};
 use vgpu_core::Sats;
 
 use crate::db::{self, AccountRow, MachineRow, RentalRow};
@@ -225,6 +225,18 @@ pub async fn create_rental(
             .await?
             .ok_or_else(|| ApiError::not_found("unknown account"))?;
 
+        // SSH key gates the SSH/container tier; the HTTP-status (`metal:`) tier
+        // runs a host-controlled job that ignores it, so accept its absence there.
+        let ssh_pubkey = match req.ssh_pubkey.as_deref().map(str::trim) {
+            Some(k) if !k.is_empty() => k.to_string(),
+            _ if is_http_status_image(&req.image) => String::new(),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "ssh_pubkey is required for this image (only metal: images may omit it)",
+                ))
+            }
+        };
+
         if !machine.online {
             return Err(ApiError::conflict("machine is offline"));
         }
@@ -257,7 +269,7 @@ pub async fn create_rental(
         .bind(req.machine_id)
         .bind(&req.account_id)
         .bind(&req.image)
-        .bind(&req.ssh_pubkey)
+        .bind(&ssh_pubkey)
         .bind(rate)
         .bind(rate)
         .bind(paid_through)
@@ -289,7 +301,7 @@ pub async fn create_rental(
         let payload = serde_json::to_string(&Command::StartRental {
             rental_id,
             image: req.image.clone(),
-            ssh_pubkey: req.ssh_pubkey.clone(),
+            ssh_pubkey: ssh_pubkey.clone(),
         })?;
         sqlx::query(
             "INSERT INTO commands (machine_id, payload, delivered, created_at) VALUES (?, ?, 0, ?)",

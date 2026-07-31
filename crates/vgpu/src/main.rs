@@ -17,6 +17,7 @@ use vgpu_core::api::{
     AccountResponse, CreateAccountResponse, CreateRentalRequest, CreateRentalResponse,
     DepositRequest, DepositResponse, HealthResponse, OffersResponse, RentalResponse,
 };
+use vgpu_core::model::is_http_status_image;
 use vgpu_core::model::RentalKind;
 
 #[derive(Parser)]
@@ -305,12 +306,19 @@ fn deposit(client: &Client, account_id: &str, sats: i64) -> anyhow::Result<()> {
 
 fn rent(client: &Client, args: RentArgs) -> anyhow::Result<()> {
     let ssh_pubkey = match (args.ssh_key, args.ssh_key_file) {
-        (Some(k), _) => k,
-        (None, Some(path)) => std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?
-            .trim()
-            .to_string(),
-        (None, None) => anyhow::bail!("provide --ssh-key or --ssh-key-file"),
+        (Some(k), _) => Some(k),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+                .trim()
+                .to_string(),
+        ),
+        // metal: images run a host-controlled job that ignores the key, so it's
+        // optional there; every other tier is an SSH box and requires one.
+        (None, None) if is_http_status_image(&args.image) => None,
+        (None, None) => {
+            anyhow::bail!("provide --ssh-key or --ssh-key-file (only metal: images may omit it)")
+        }
     };
 
     let resp: CreateRentalResponse = client.post(

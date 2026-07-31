@@ -205,7 +205,11 @@ pub struct CreateRentalRequest {
     pub machine_id: i64,
     pub account_id: String,
     pub image: String,
-    pub ssh_pubkey: String,
+    /// Optional only for HTTP-status (`metal:`) images, whose worker ignores it;
+    /// required for the SSH/container tier (see `model::is_http_status_image`).
+    /// Omitting the field entirely deserializes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_pubkey: Option<String>,
 }
 
 /// Response to `POST /rentals`.

@@ -116,8 +116,9 @@ code. The host runs one host-controlled program:
 # No venv, no Python — just the binary.
 vgpu-agent --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 5
 
-# tenant — rent GPU time (GEMM, live TFLOP/s):
-vgpu rent --machine-id <id> --account-id <acct> --image metal:gemm:2048 --ssh-key unused
+# tenant — rent GPU time (GEMM, live TFLOP/s). No --ssh-key needed: the metal:
+# tier serves an HTTP status endpoint, not an SSH box.
+vgpu rent --machine-id <id> --account-id <acct> --image metal:gemm:2048
 curl http://<host>:<port>/   # {"task":"gemm-fp16","n":2048,"iters":...,"tflops":...}
 ```
 

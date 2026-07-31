@@ -93,6 +93,15 @@ pub enum RentalKind {
     HttpOpenai,
 }
 
+/// True if `image` targets the HTTP-status (native Metal) tier, whose worker
+/// runs a host-controlled job and ignores any tenant SSH key — so a rental for
+/// such an image may omit `ssh_pubkey`. Mirrors the agent's runtime dispatch,
+/// which routes `metal:` images to the Metal backend and everything else to the
+/// SSH/container tier. Single source of truth for both the CLI and the API.
+pub fn is_http_status_image(image: &str) -> bool {
+    image.starts_with("metal:")
+}
+
 /// Kind of a ledger entry (SPEC §3, `ledger.kind`). The append-only audit trail
 /// is double-entry: `SUM(delta_sats) == 0` across the whole table, always.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +119,15 @@ pub enum LedgerKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_status_tier_is_metal_prefixed() {
+        assert!(is_http_status_image("metal:gemm"));
+        assert!(is_http_status_image("metal:gemm:4096"));
+        assert!(!is_http_status_image("nvidia/cuda:latest"));
+        assert!(!is_http_status_image("pytorch/pytorch:latest"));
+        assert!(!is_http_status_image("")); // no image ⇒ SSH tier ⇒ key required
+    }
 
     #[test]
     fn occupied_states_match_spec() {

@@ -250,6 +250,15 @@ gpu-bench run                             # real measured GPU numbers on that ho
   current producer (it was the removed `mlx:generate` inference endpoint).
   `ssh_command` is still populated for the `ssh` kind; `kind` defaults to `ssh`,
   so the acceptance test is unchanged.
+- **`ssh_pubkey` is optional for the HTTP-status tier.** SPEC §7 lists
+  `ssh_pubkey` as a required `POST /rentals` field, but the `metal:` (native
+  Metal) tier runs a host-controlled job that never consumes it, so requiring a
+  throwaway key was pure friction. `CreateRentalRequest.ssh_pubkey` is now
+  `Option<String>`; the control plane requires it iff the image is not a
+  `metal:` image (`vgpu_core::model::is_http_status_image` is the single source
+  of truth, shared by the CLI and the route) and stores `""` when absent, so the
+  DB column stays `NOT NULL` (no migration) and the SSH/container tier still
+  demands a real key.
 
 ## Deliberate gaps
 
