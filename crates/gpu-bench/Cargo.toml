@@ -14,7 +14,7 @@ description = "Vendor-agnostic GPU compute benchmark (fp GEMM throughput + memor
 default = []
 # cuBLAS backend for peak NVIDIA numbers, via cudarc (runtime-loaded, so it
 # builds without the CUDA toolkit present but runs only on an NVIDIA host).
-# The MLX backend needs no feature — it shells out to a Python with `mlx`.
+# The native `metal` backend needs no feature — it's a macOS-only target dep.
 cuda = ["dep:cudarc"]
 
 [lib]
@@ -27,8 +27,8 @@ path = "src/main.rs"
 
 [dependencies]
 # Portable GPU compute: Metal on macOS, Vulkan on NVIDIA/AMD, DX12 on Windows.
-# One WGSL kernel, every vendor. Native peak-throughput backends (cuBLAS, MLX,
-# rocBLAS) are added later behind Cargo features.
+# One WGSL kernel, every vendor. Native peak-throughput backends (Apple `metal`
+# ships; cuBLAS behind a feature; rocBLAS later).
 wgpu = "30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
@@ -55,7 +55,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 
-# Native Apple-GPU backend: Metal Performance Shaders GEMM (peak, no Python/cmake).
-# macOS-only — Metal doesn't exist elsewhere.
+# Native Apple-GPU backend: a Metal `simdgroup_matrix` GEMM kernel (peak, no
+# Python/cmake). macOS-only — Metal doesn't exist elsewhere. `objc2-metal` is the
+# actively-maintained binding (the older `metal`/metal-rs crate is deprecated).
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.29"
+objc2 = "0.6"
+objc2-metal = "0.3"
+objc2-foundation = "0.3"

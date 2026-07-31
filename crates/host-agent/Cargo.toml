@@ -34,3 +34,11 @@ sysinfo = "0.32"
 nvml-wrapper = "0.10"
 bollard = "0.17"
 futures-util = "0.3"
+
+# macOS: native Metal GEMM worker (Rust-only, no Python/cmake). `objc2-metal` is
+# the actively-maintained binding (the older `metal`/metal-rs crate is deprecated).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-metal = "0.3"
+objc2-foundation = "0.3"
+half = "2"

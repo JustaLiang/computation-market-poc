@@ -2,8 +2,8 @@
 //!
 //! Measures GEMM (matrix-multiply) throughput and memory bandwidth through a
 //! [`Backend`] abstraction. The portable [`WgpuBackend`] runs on Metal, Vulkan,
-//! and DX12; native peak-throughput backends (cuBLAS, MLX, rocBLAS) implement
-//! the same trait behind Cargo features.
+//! and DX12; native peak-throughput backends — Apple [`MetalBackend`] and cuBLAS
+//! (`feature = "cuda"`) — implement the same trait.
 //!
 //! This crate is deliberately standalone — it has no knowledge of the rental
 //! marketplace. The host-agent can later derive `dlperf` from a GEMM result

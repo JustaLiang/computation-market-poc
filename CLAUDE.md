@@ -219,24 +219,30 @@ gpu-bench run                             # real measured GPU numbers on that ho
   registered host lists in `/offers` immediately (SPEC §10 step 2).
 - **`gpu-bench` crate added** — a standalone GPU benchmark behind a `Backend`
   trait: `wgpu` (portable, default), `metal` (native Metal `simdgroup_matrix`,
-  Apple matrix units, macOS-only), and cuBLAS (`--features cuda`, NVIDIA-host
-  only, not compile-checked here). The fp16 GEMM in `host-agent/src/benchmark.rs`
-  is still the SPEC §6 name-lookup fallback; real measurement lives in `gpu-bench`.
-  (The host-agent's `mlx:*` runtime still uses Python MLX — a separate concern.)
+  Apple matrix units, macOS-only, via `objc2-metal`), and cuBLAS
+  (`--features cuda`, NVIDIA-host only, not compile-checked here). The fp16 GEMM
+  in `host-agent/src/benchmark.rs` is still the SPEC §6 name-lookup fallback;
+  real measurement lives in `gpu-bench`.
 - **Host agent is two-platform** behind a `HostRuntime` trait chosen by target
   OS: Linux = Docker + NVML (the real host tier); macOS = Metal/`system_profiler`
-  inventory + an **MLX-only** runtime — the host runs an allowlisted,
-  host-controlled MLX program (image `mlx:gemm[:N]` = fp16 GEMM loop, or
-  `mlx:generate:<model>` = `mlx_lm.server` OpenAI-compatible inference), never
-  tenant code, as the isolation model in lieu of a microVM (needs a Python with
-  `mlx`/`mlx-lm`, via `VGPU_MLX_PYTHON`). Same `vgpu-agent` binary, flags, and
-  protocol — only `benchmark.rs`/`runtime.rs` differ.
+  inventory + a **native Metal** runtime (`mac`) — Rust-only, **no Python, no
+  `cmake`**. The host runs one allowlisted, host-controlled program: image
+  `metal:gemm[:N]` = a continuous fp16 GEMM via a `simdgroup_matrix` MSL kernel
+  (`crates/host-agent/src/mac_worker.rs`, launched by re-invoking the binary as
+  `vgpu-agent __mac-worker <n> <port>`), exposing a live-throughput JSON status
+  endpoint. Never tenant code — that bounded surface is the isolation model in
+  lieu of a microVM. A non-`metal:` image is rejected. Same `vgpu-agent` binary,
+  flags, and protocol — only `benchmark.rs`/`runtime.rs`/`mac_worker.rs` differ.
+  Both the macOS host runtime and `gpu-bench`'s `metal` backend use `objc2-metal`
+  (the older `metal`/metal-rs crate is deprecated); nothing on macOS shells out.
 - **`RentalKind` extends `RentalResponse`.** SPEC §7 derives only an SSH
   `ssh_command`; the impl adds a `kind` (`ssh` | `http_status` | `http_openai`)
   reported by the agent so the tenant CLI shows the right endpoint hint (an SSH
-  box vs a `curl` to an HTTP / OpenAI endpoint). `ssh_command` is still populated
-  for the `ssh` kind; `kind` defaults to `ssh`, so the acceptance test is
-  unchanged.
+  box vs a `curl` to an HTTP endpoint). The Metal tier reports `http_status`; the
+  container tier reports `ssh`. `http_openai` is a reserved variant with no
+  current producer (it was the removed `mlx:generate` inference endpoint).
+  `ssh_command` is still populated for the `ssh` kind; `kind` defaults to `ssh`,
+  so the acceptance test is unchanged.
 
 ## Deliberate gaps
 

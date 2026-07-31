@@ -6,10 +6,11 @@
 //!
 //! - **Linux** (`docker`): tenant containers via `bollard` with `--gpus all`
 //!   GPU passthrough. This is the real host tier (SPEC).
-//! - **macOS** (`mac`): an **MLX-only** runtime — the host runs an allowlisted,
-//!   host-controlled MLX job (fp16 GEMM) and *never* tenant code. Parameters,
-//!   not a shell: that bounded surface is the isolation model in lieu of a
-//!   microVM. Needs a Python with `mlx` (`VGPU_MLX_PYTHON`, default `python3`).
+//! - **macOS** (`mac`): a native **Metal** runtime (Rust-only, no Python) — the
+//!   host runs an allowlisted, host-controlled fp16 GEMM worker (a
+//!   `simdgroup_matrix` MSL kernel via `objc2-metal`) and *never* tenant code.
+//!   Parameters, not a shell: that bounded surface is the isolation model in
+//!   lieu of a microVM. See [`crate::mac_worker`].
 //!
 //! Same `vgpu-agent` binary, same flags, same control-plane protocol; only the
 //! guts differ. `main.rs` holds a `dyn HostRuntime` and never names a backend.
@@ -20,7 +21,7 @@ use vgpu_core::model::RentalKind;
 
 /// What to launch. A control-plane `start_rental` command maps onto this.
 ///
-/// `ssh_pubkey` is consumed only by the Docker backend (Linux); the MLX runtime
+/// `ssh_pubkey` is consumed only by the Docker backend (Linux); the Metal runtime
 /// uses `image` (the task spec) and `rental_id` but not the key, so the allow is
 /// scoped to non-Linux.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -35,7 +36,7 @@ pub struct RentalSpec {
 pub struct Started {
     pub container_id: String,
     /// Host-side port, reachable at the machine's `public_ip`. SSH for the
-    /// container tier; an HTTP endpoint for MLX jobs (see `kind`).
+    /// container tier; an HTTP endpoint for Metal jobs (see `kind`).
     pub ssh_port: i32,
     /// How a tenant connects — drives the client's endpoint hint.
     pub kind: RentalKind,
@@ -72,7 +73,7 @@ pub async fn connect(port_start: i32, port_end: i32) -> anyhow::Result<Box<dyn H
         Box::new(docker::DockerRuntime::connect(port_start, port_end).await?);
 
     #[cfg(target_os = "macos")]
-    let runtime: Box<dyn HostRuntime> = Box::new(mac::MlxRuntime::connect(port_start, port_end)?);
+    let runtime: Box<dyn HostRuntime> = Box::new(mac::MetalRuntime::connect(port_start, port_end)?);
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let runtime: Box<dyn HostRuntime> = {
@@ -382,12 +383,11 @@ mod docker {
     }
 }
 
-// --- macOS: MLX-only runtime (host-controlled MLX jobs) --------------------
+// --- macOS: native Metal runtime (Rust-only, no Python) --------------------
 
 #[cfg(target_os = "macos")]
 mod mac {
     use std::collections::{BTreeSet, HashMap};
-    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -396,38 +396,20 @@ mod mac {
 
     use super::{pick_free_port, HostRuntime, RentalKind, RentalSpec, RunningRental, Started};
 
-    /// An allowlisted, host-controlled MLX task. The tenant supplies only
-    /// *parameters* (via the rental image), never code — that bounded surface is
-    /// the isolation model.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum MlxTask {
-        /// fp16 GEMM loop — a GPU-time benchmark workload. `mlx:gemm[:N]`.
+    /// An allowlisted native workload. The tenant supplies only *parameters* (the
+    /// rental image `metal:gemm[:N]`), never code — the host runs its own Metal
+    /// GEMM worker. That bounded surface is the isolation model.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MetalTask {
         Gemm { n: u32 },
-        /// `mlx-lm` text generation, served OpenAI-compatibly on the port.
-        /// `mlx:generate:<hf-model-id>` (e.g. mlx-community/Llama-3.2-1B-Instruct-4bit).
-        Generate { model: String },
-    }
-
-    /// A Hugging Face model id is safe to pass as a bare argument: `org/name`,
-    /// conservative charset, no path traversal. (We pass it as an argv, never
-    /// through a shell.) `mlx-community/*` repos are MLX-format weights + config —
-    /// data, not code.
-    fn valid_model_id(s: &str) -> bool {
-        !s.is_empty()
-            && !s.contains("..")
-            && s.split('/').count() == 2
-            && s.split('/').all(|seg| !seg.is_empty())
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
     }
 
     /// Parse a rental image into an allowlisted task. Rejects anything that is
-    /// not `mlx:...` — an MLX-only host does not run arbitrary images.
-    fn parse_task(image: &str) -> anyhow::Result<MlxTask> {
-        let rest = image.strip_prefix("mlx:").ok_or_else(|| {
+    /// not `metal:...` — this host runs native Metal jobs only.
+    fn parse_task(image: &str) -> anyhow::Result<MetalTask> {
+        let rest = image.strip_prefix("metal:").ok_or_else(|| {
             anyhow::anyhow!(
-                "this host runs MLX jobs only — image must be 'mlx:gemm[:N]' or \
-                 'mlx:generate:<model>' (got {image:?})"
+                "this host runs native Metal jobs only — image must be 'metal:gemm[:N]' (got {image:?})"
             )
         })?;
         let (task, arg) = match rest.split_once(':') {
@@ -435,28 +417,19 @@ mod mac {
             None => (rest, None),
         };
         match task {
-            "gemm" | "selftest" => {
+            "gemm" => {
                 let n = arg
                     .map(str::parse::<u32>)
                     .transpose()
                     .map_err(|_| anyhow::anyhow!("invalid GEMM size in {image:?}"))?
                     .unwrap_or(2048);
-                anyhow::ensure!((256..=16384).contains(&n), "GEMM size out of range: {n}");
-                Ok(MlxTask::Gemm { n })
-            }
-            "generate" => {
-                let model = arg.ok_or_else(|| {
-                    anyhow::anyhow!("missing model: use 'mlx:generate:<hf-model-id>'")
-                })?;
                 anyhow::ensure!(
-                    valid_model_id(model),
-                    "invalid model id {model:?}; expected 'org/name' (e.g. mlx-community/…)"
+                    (256..=16384).contains(&n) && n % 8 == 0,
+                    "GEMM size must be a multiple of 8 in 256..=16384 (got {n})"
                 );
-                Ok(MlxTask::Generate {
-                    model: model.to_string(),
-                })
+                Ok(MetalTask::Gemm { n })
             }
-            other => anyhow::bail!("unknown MLX task {other:?}; supported: gemm, generate"),
+            other => anyhow::bail!("unknown Metal task {other:?}; supported: gemm"),
         }
     }
 
@@ -465,100 +438,21 @@ mod mac {
         port: i32,
     }
 
-    /// Runs host-controlled MLX jobs as child processes of a configured Python
-    /// (`VGPU_MLX_PYTHON`, default `python3`). Only host-controlled code ever
-    /// runs: the bundled GEMM worker, or `mlx_lm.server` for generation. `gemm`
-    /// needs `mlx`; `generate` needs `mlx-lm`.
-    pub struct MlxRuntime {
-        python: String,
-        script_path: PathBuf,
-        mlx_available: bool,
-        mlx_lm_available: bool,
+    /// Runs native Metal GEMM jobs as child processes — re-invoking this same
+    /// `vgpu-agent` binary with the hidden `__mac-worker` subcommand (see
+    /// [`crate::mac_worker`]). No Python, no external toolchain.
+    pub struct MetalRuntime {
+        exe: PathBuf,
         port_start: i32,
         port_end: i32,
         jobs: Mutex<HashMap<i64, Job>>,
     }
 
-    /// The host-controlled MLX worker: an fp16 GEMM loop on the Apple GPU plus a
-    /// tiny HTTP status endpoint the tenant can poll for live throughput. Never
-    /// runs tenant-supplied code.
-    const MLX_WORKER: &str = r#"
-import sys, time, threading, json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import mlx.core as mx
-
-n = int(sys.argv[1]); port = int(sys.argv[2])
-max_secs = float(sys.argv[3]) if len(sys.argv) > 3 else 3600.0
-state = {"task": "gemm-fp16", "n": n, "iters": 0, "tflops": 0.0}
-
-def worker():
-    a = mx.random.normal((n, n)).astype(mx.float16)
-    b = mx.random.normal((n, n)).astype(mx.float16)
-    start = time.time()
-    while time.time() - start < max_secs:
-        c = a @ b
-        mx.eval(c)
-        state["iters"] += 1
-        el = time.time() - start
-        if el > 0:
-            state["tflops"] = 2 * n**3 * state["iters"] / el / 1e12
-
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = json.dumps(state).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def log_message(self, *a):
-        pass
-
-threading.Thread(target=worker, daemon=True).start()
-print("[mlx-job] serving status on :%d (task=gemm-fp16 n=%d)" % (port, n), flush=True)
-HTTPServer(("0.0.0.0", port), H).serve_forever()
-"#;
-
-    impl MlxRuntime {
+    impl MetalRuntime {
         pub fn connect(port_start: i32, port_end: i32) -> anyhow::Result<Self> {
-            let python = std::env::var("VGPU_MLX_PYTHON").unwrap_or_else(|_| "python3".to_string());
-
-            // Write the bundled worker to a temp file — the only code we run.
-            let script_path = std::env::temp_dir().join("vgpu-mlx-worker.py");
-            std::fs::File::create(&script_path)
-                .with_context(|| format!("writing MLX worker to {}", script_path.display()))?
-                .write_all(MLX_WORKER.as_bytes())?;
-
-            // Probe capabilities so rentals fail early — the host still registers.
-            let mlx_available = std::process::Command::new(&python)
-                .args(["-c", "import mlx.core"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            let mlx_lm_available = std::process::Command::new(&python)
-                .args(["-c", "import mlx_lm"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !mlx_available {
-                tracing::warn!(
-                    python = %python,
-                    "MLX unavailable (import mlx.core failed); host registers but `mlx:gemm` \
-                     rentals fail until `pip install mlx` in that Python"
-                );
-            }
-            if !mlx_lm_available {
-                tracing::warn!(
-                    python = %python,
-                    "mlx-lm unavailable; `mlx:generate` rentals fail until `pip install mlx-lm`"
-                );
-            }
-
+            let exe = std::env::current_exe().context("resolving the vgpu-agent path")?;
             Ok(Self {
-                python,
-                script_path,
-                mlx_available,
-                mlx_lm_available,
+                exe,
                 port_start,
                 port_end,
                 jobs: Mutex::new(HashMap::new()),
@@ -568,86 +462,45 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
         fn used_ports(&self) -> BTreeSet<i32> {
             self.jobs
                 .lock()
-                .expect("mlx jobs lock")
+                .expect("jobs lock")
                 .values()
                 .map(|j| j.port)
                 .collect()
         }
-
-        /// Build the child command for a task. Only host-controlled programs are
-        /// spawned; the tenant's input reaches them only as validated arguments.
-        fn build_command(&self, task: &MlxTask, port: i32) -> tokio::process::Command {
-            let mut cmd = tokio::process::Command::new(&self.python);
-            match task {
-                MlxTask::Gemm { n } => {
-                    cmd.arg(&self.script_path)
-                        .arg(n.to_string())
-                        .arg(port.to_string());
-                }
-                MlxTask::Generate { model } => {
-                    // mlx-lm's OpenAI-compatible server; model is a validated id.
-                    cmd.arg("-m")
-                        .arg("mlx_lm.server")
-                        .arg("--model")
-                        .arg(model)
-                        .arg("--host")
-                        .arg("0.0.0.0")
-                        .arg("--port")
-                        .arg(port.to_string());
-                }
-            }
-            cmd
-        }
     }
 
     #[async_trait]
-    impl HostRuntime for MlxRuntime {
+    impl HostRuntime for MetalRuntime {
         async fn start_rental(&self, spec: RentalSpec) -> anyhow::Result<Started> {
-            let task = parse_task(&spec.image)?;
-            match &task {
-                MlxTask::Gemm { .. } => anyhow::ensure!(
-                    self.mlx_available,
-                    "MLX unavailable: `import mlx.core` failed for {} (pip install mlx)",
-                    self.python
-                ),
-                MlxTask::Generate { .. } => anyhow::ensure!(
-                    self.mlx_lm_available,
-                    "mlx-lm unavailable: `import mlx_lm` failed for {} (pip install mlx-lm)",
-                    self.python
-                ),
-            }
-
-            let kind = match &task {
-                MlxTask::Gemm { .. } => RentalKind::HttpStatus,
-                MlxTask::Generate { .. } => RentalKind::HttpOpenai,
-            };
+            let MetalTask::Gemm { n } = parse_task(&spec.image)?;
 
             let used = self.used_ports();
             let port = pick_free_port(self.port_start, self.port_end, &used).ok_or_else(|| {
                 anyhow::anyhow!("no free port in {}..={}", self.port_start, self.port_end)
             })?;
 
-            // Spawn is synchronous. gemm runs the bundled worker; generate runs
-            // mlx-lm's OpenAI-compatible server on the port.
-            let child = self
-                .build_command(&task, port)
+            // Spawn is synchronous; the worker runs the GEMM loop + status HTTP.
+            let child = tokio::process::Command::new(&self.exe)
+                .arg("__mac-worker")
+                .arg(n.to_string())
+                .arg(port.to_string())
                 .spawn()
-                .with_context(|| format!("spawning MLX job via {}", self.python))?;
+                .context("spawning the native Metal worker")?;
 
             self.jobs
                 .lock()
-                .expect("mlx jobs lock")
+                .expect("jobs lock")
                 .insert(spec.rental_id, Job { child, port });
 
             Ok(Started {
-                container_id: format!("mlx-job-{}", spec.rental_id),
-                ssh_port: port, // gemm: status endpoint; generate: OpenAI API
-                kind,
+                container_id: format!("metal-job-{}", spec.rental_id),
+                ssh_port: port, // the HTTP status endpoint, not SSH
+                kind: RentalKind::HttpStatus,
             })
         }
 
         async fn stop_rental(&self, rental_id: i64) -> anyhow::Result<()> {
-            let job = self.jobs.lock().expect("mlx jobs lock").remove(&rental_id);
+            let job = self.jobs.lock().expect("jobs lock").remove(&rental_id);
             if let Some(mut job) = job {
                 let _ = job.child.kill().await;
                 let _ = job.child.wait().await;
@@ -656,7 +509,7 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
         }
 
         async fn running_rentals(&self) -> anyhow::Result<Vec<RunningRental>> {
-            let mut jobs = self.jobs.lock().expect("mlx jobs lock");
+            let mut jobs = self.jobs.lock().expect("jobs lock");
             let mut out = Vec::new();
             let mut dead = Vec::new();
             for (rental_id, job) in jobs.iter_mut() {
@@ -665,7 +518,7 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
                 } else {
                     out.push(RunningRental {
                         rental_id: *rental_id,
-                        container_id: format!("mlx-job-{rental_id}"),
+                        container_id: format!("metal-job-{rental_id}"),
                         ssh_port: job.port,
                     });
                 }
@@ -689,40 +542,27 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
         use super::*;
 
         #[test]
-        fn rejects_non_mlx_images() {
+        fn rejects_non_metal_images() {
             assert!(parse_task("nvidia/cuda:latest").is_err());
+            assert!(parse_task("mlx:generate:org/model").is_err());
         }
 
         #[test]
-        fn parses_gemm_default_and_explicit_size() {
-            assert_eq!(parse_task("mlx:gemm").unwrap(), MlxTask::Gemm { n: 2048 });
+        fn parses_gemm_default_and_explicit() {
             assert_eq!(
-                parse_task("mlx:gemm:4096").unwrap(),
-                MlxTask::Gemm { n: 4096 }
+                parse_task("metal:gemm").unwrap(),
+                MetalTask::Gemm { n: 2048 }
+            );
+            assert_eq!(
+                parse_task("metal:gemm:4096").unwrap(),
+                MetalTask::Gemm { n: 4096 }
             );
         }
 
         #[test]
-        fn rejects_out_of_range_size() {
-            assert!(parse_task("mlx:gemm:1").is_err());
-        }
-
-        #[test]
-        fn parses_generate_model() {
-            assert_eq!(
-                parse_task("mlx:generate:mlx-community/Llama-3.2-1B-Instruct-4bit").unwrap(),
-                MlxTask::Generate {
-                    model: "mlx-community/Llama-3.2-1B-Instruct-4bit".to_string()
-                }
-            );
-        }
-
-        #[test]
-        fn generate_requires_a_valid_model() {
-            assert!(parse_task("mlx:generate").is_err()); // no model
-            assert!(parse_task("mlx:generate:not-a-repo").is_err()); // no '/'
-            assert!(parse_task("mlx:generate:../etc/passwd").is_err()); // traversal
-            assert!(parse_task("mlx:generate:a/b/c").is_err()); // too many segments
+        fn rejects_bad_size() {
+            assert!(parse_task("metal:gemm:100").is_err()); // not a multiple of 8
+            assert!(parse_task("metal:gemm:1").is_err()); // out of range
         }
     }
 }

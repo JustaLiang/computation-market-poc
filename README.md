@@ -4,7 +4,7 @@ A **GPU rental marketplace** with **Bitcoin/Lightning** payments, in Rust.
 Providers list a GPU host and set one price in sats/min; tenants deposit
 over Lightning, rent by the minute (billed in advance), and are evicted at zero
 balance. The control plane is a rendezvous + accounting service — **not** a proxy;
-workload traffic (SSH, or an HTTP endpoint for MLX jobs) goes straight to the host.
+workload traffic (SSH, or an HTTP endpoint for Metal jobs) goes straight to the host.
 
 Normative behaviour lives in [`docs/SPEC.md`](docs/SPEC.md); the "why" is in
 [`docs/BACKGROUND.md`](docs/BACKGROUND.md).
@@ -98,40 +98,33 @@ vgpu-agent \
 Control traffic is agent-initiated, so the host only needs outbound access to the
 server; tenants reach `port_start..port_end` at `public_ip` for SSH.
 
-## Apple Silicon (MLX-only tier)
+## Apple Silicon (native Metal tier)
 
 The **same `vgpu-agent` binary** runs on macOS behind a `HostRuntime` trait: it
 inventories via Metal/`system_profiler`, benchmarks, registers (a Mac shows up in
-`vgpu offers` as e.g. `Apple M4 Max`), and lends compute as an **MLX-only** tier.
-The isolation model is an allowlist, not a shell: the tenant supplies only
-*parameters* (the rental image), never code. The host runs one of a fixed set of
-host-controlled programs:
+`vgpu offers` as e.g. `Apple M4 Max`), and lends compute as a **native Metal**
+tier — **Rust-only, no Python, no `cmake`**. The isolation model is an allowlist,
+not a shell: the tenant supplies only *parameters* (the rental image), never
+code. The host runs one host-controlled program:
 
-- `mlx:gemm[:N]` — an fp16 GEMM loop on the Apple GPU with a live-throughput
-  status endpoint.
-- `mlx:generate:<hf-model-id>` — `mlx_lm.server` (OpenAI-compatible LLM inference)
-  on the mapped port; the tenant picks a model, not code.
+- `metal:gemm[:N]` — a continuous fp16 GEMM on the Apple GPU via a
+  `simdgroup_matrix` MSL kernel (the matrix units), with a live-throughput JSON
+  status endpoint. The agent launches it by re-invoking its own binary; the
+  worker lives in `crates/host-agent/src/mac_worker.rs`.
 
 ```bash
-python3 -m venv .mlx && .mlx/bin/pip install mlx mlx-lm
-VGPU_MLX_PYTHON="$PWD/.mlx/bin/python" vgpu-agent \
-  --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 5
+# No venv, no Python — just the binary.
+vgpu-agent --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 5
 
-# tenant — rent GPU time (GEMM benchmark, live TFLOP/s):
-vgpu rent --machine-id <id> --account-id <acct> --image mlx:gemm:2048 --ssh-key unused
-curl http://<host>:<port>/
-
-# tenant — rent an LLM inference endpoint:
-vgpu rent --machine-id <id> --account-id <acct> \
-  --image mlx:generate:mlx-community/Llama-3.2-1B-Instruct-4bit --ssh-key unused
-curl http://<host>:<port>/v1/chat/completions -H content-type:application/json \
-  -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":40}'
+# tenant — rent GPU time (GEMM, live TFLOP/s):
+vgpu rent --machine-id <id> --account-id <acct> --image metal:gemm:2048 --ssh-key unused
+curl http://<host>:<port>/   # {"task":"gemm-fp16","n":2048,"iters":...,"tflops":...}
 ```
 
-Arbitrary containers + SSH are the Linux tier; on macOS a non-`mlx:` image is
+Arbitrary containers + SSH are the Linux tier; on macOS a non-`metal:` image is
 rejected. Each rental carries a **kind** (`ssh` | `http_status` | `http_openai`),
 so `vgpu rental <id>` prints the right hint — an `ssh` command for the container
-tier, or the matching `curl` for an MLX endpoint. See
+tier, or the matching `curl` for the Metal status endpoint. See
 `crates/host-agent/src/runtime.rs`.
 
 ## gpu-bench (standalone)
@@ -149,14 +142,14 @@ gpu-bench net                  # network-only probe (down/up/latency)
 
 Backends (behind a `Backend` trait): **wgpu** (portable Metal/Vulkan/DX12 — ALU
 throughput, the default), **metal** (native `simdgroup_matrix` on Apple's matrix
-units — pure Rust, no Python; ~3.7 vs ~0.6 TFLOP/s fp16 on an M4 Max; macOS
-only), and **cuBLAS** (`--backend cuda`, built with `--features cuda` on an NVIDIA
-host).
+units via `objc2-metal` — pure Rust, no Python/`cmake`; ~3.7 vs ~0.6 TFLOP/s fp16
+on an M4 Max; macOS only), and **cuBLAS** (`--backend cuda`, built with
+`--features cuda` on an NVIDIA host).
 
 ## Development
 
 ```bash
-cargo test --workspace         # 34 tests incl. the SPEC §10 acceptance test
+cargo test --workspace         # 32 tests incl. the SPEC §10 acceptance test
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo audit                    # clean (see .cargo/audit.toml for one accepted, unused-dep advisory)

@@ -4,8 +4,8 @@
 //! This measures **plain ALU throughput**: the GEMM kernel is a tiled matmul in
 //! WGSL, not a tensor-core/matrix-core kernel (wgpu doesn't expose those). So
 //! the numbers are honest but sub-peak — excellent for ranking devices and
-//! sanity-checking, not a substitute for cuBLAS/MLX peak figures. Those land as
-//! separate `Backend` implementations behind Cargo features.
+//! sanity-checking, not a substitute for the peak figures from the native
+//! `metal` (Apple) and cuBLAS (NVIDIA) `Backend` implementations.
 
 use std::borrow::Cow;
 use std::time::Instant;

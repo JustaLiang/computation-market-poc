@@ -9,6 +9,8 @@
 //! this file is the control glue between them and the control plane.
 
 mod benchmark;
+#[cfg(target_os = "macos")]
+mod mac_worker;
 mod runtime;
 
 use std::path::{Path, PathBuf};
@@ -298,6 +300,20 @@ async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<dyn HostRuntime>, cmd: Command)
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Hidden re-entrant subcommand: on macOS the runtime launches a rental by
+    // re-invoking this binary as `vgpu-agent __mac-worker <n> <port>`, which runs
+    // the native Metal GEMM worker and never returns until killed. Intercept it
+    // before any arg parsing or control-plane setup.
+    #[cfg(target_os = "macos")]
+    {
+        let a: Vec<String> = std::env::args().collect();
+        if a.get(1).map(String::as_str) == Some("__mac-worker") {
+            let n = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(2048u32);
+            let port = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(40000u16);
+            return mac_worker::run(n, port);
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

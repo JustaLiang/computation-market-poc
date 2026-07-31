@@ -1,8 +1,8 @@
 //! The vendor-agnostic benchmark interface.
 //!
 //! A [`Backend`] is one way of running compute on one device: the portable
-//! `wgpu` backend (Metal/Vulkan/DX12) implements it today; native cuBLAS, MLX,
-//! and rocBLAS backends will implement the same trait behind Cargo features.
+//! The `wgpu` (portable) and native Apple `metal` backends implement it today;
+//! cuBLAS (NVIDIA) and a future rocBLAS backend implement the same trait.
 //! Everything above this trait — the CLI, the report, a future `dlperf` adapter
 //! — is written against the trait and never against a specific vendor.
 

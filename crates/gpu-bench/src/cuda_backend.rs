@@ -2,10 +2,11 @@
 //!
 //! Built via `cudarc`. Its build script needs the CUDA toolkit headers, so this
 //! feature compiles **only on a machine with CUDA installed** (an NVIDIA host);
-//! `dynamic-linking` then loads the CUDA libraries at runtime. Like MLX, cuBLAS
-//! reaches the GPU's real tensor-core throughput, far above the portable WGSL
-//! path. GEMM only — the suite treats bandwidth as best-effort, so this backend
-//! leaves the bandwidth number to the portable backend.
+//! `dynamic-linking` then loads the CUDA libraries at runtime. Like the Apple
+//! `metal` backend, cuBLAS reaches the GPU's real tensor-core throughput, far
+//! above the portable WGSL path. GEMM only — the suite treats bandwidth as
+//! best-effort, so this backend leaves the bandwidth number to the portable
+//! backend.
 //!
 //! NOTE: written against the cudarc/cuBLAS API but **not compile-checked here**
 //! (no CUDA hardware) — validate on an NVIDIA host.
