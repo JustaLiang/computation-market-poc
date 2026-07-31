@@ -1,34 +1,153 @@
-# gpu-market — spec bundle
+# computation-market-poc
 
-Design context for a vast.ai-shaped GPU rental marketplace with Bitcoin payments
-over Lightning. No implementation here; this is the handoff for building one.
+A vast.ai-shaped **GPU rental marketplace** with **Bitcoin/Lightning** payments,
+in Rust. Providers list a GPU host and set one price in sats/min; tenants deposit
+over Lightning, rent by the minute (billed in advance), and are evicted at zero
+balance. The control plane is a rendezvous + accounting service — **not** a proxy;
+workload traffic (SSH) goes straight to the host.
 
-| File | Purpose |
-|---|---|
-| `CLAUDE.md` | Read automatically by Claude Code. Rust stack, workspace layout, invariants, build order. |
-| `docs/SPEC.md` | Normative spec: data model, HTTP API, billing algorithm, state machine, acceptance test. |
-| `docs/BACKGROUND.md` | Why the design is what it is. Market analysis, the hard parts ranked, decisions not to re-litigate. |
+Normative behaviour lives in [`docs/SPEC.md`](docs/SPEC.md); the "why" is in
+[`docs/BACKGROUND.md`](docs/BACKGROUND.md).
 
-## Use with Claude Code
+**Status:** implemented and runnable end to end on a mock Lightning backend
+(no GPU, no Docker, no node). `cargo test --workspace` is green, including the
+SPEC §10 acceptance test which asserts `SUM(ledger.delta_sats) == 0`. The only
+unbuilt piece is real Lightning (`LndRest`); use `LN_BACKEND=mock`.
 
-```bash
-mkdir gpu-market && cd gpu-market
-# copy CLAUDE.md and docs/ in
-git init && git add -A && git commit -m "spec"
-claude
+```
+   Tenant ──── HTTP ───▶ Control plane ◀─── HTTP (agent-initiated) ─── Host agent
+   (vgpu CLI)          (offers · sats ledger ·                        (GPUs, Docker)
+       │                command queue)                                     │
+       └──────────────── SSH / workload, direct to the host ──────────────┘
 ```
 
-Then: `read docs/SPEC.md and docs/BACKGROUND.md, then implement step 1 from the
-build order in CLAUDE.md`.
+## Components
 
-Build steps 1–7 need no GPU, no container runtime, and no Lightning node. Get
-`tests/lifecycle.rs` green before starting the host agent.
+| Binary | Crate | Role |
+|---|---|---|
+| `control-plane` | `crates/control-plane` | axum server: offer index, custodial sats ledger, billing ticker |
+| `vgpu-agent` | `crates/host-agent` | runs on a GPU host: registers, heartbeats, launches workloads |
+| `vgpu` | `crates/vgpu` | tenant CLI: browse offers, deposit, rent, stop |
+| `gpu-bench` | `crates/gpu-bench` | standalone vendor-agnostic GPU benchmark (fp32/fp16 GEMM + bandwidth + network) |
+| — | `crates/core` (`vgpu-core`) | shared types (`Sats`, DTOs); no I/O |
 
-## Scope in one paragraph
+## Prerequisites
 
-Host agent is full: registers, self-benchmarks, heartbeats, runs containers with
-GPU passthrough, maps SSH ports, tears down on command. Control plane is an offer
-index only — no auction, no matching engine, no reputation. Providers set one
-integer price in sats per minute. Payment is Lightning with a prepaid balance:
-deposit once, metered per minute charged in advance, evicted at zero. Nothing
-except payment touches a chain.
+- **Rust 1.75+** (`rustup`). Everything below builds on macOS or Linux.
+- To rent out a **real GPU** (host tier): **Linux + NVIDIA driver + Docker + the
+  NVIDIA Container Toolkit** (`docker run --gpus all …` must work).
+
+```bash
+git clone https://github.com/JustaLiang/computation-market-poc
+cd computation-market-poc
+cargo build --release        # binaries land in target/release/
+```
+
+## Quickstart — the whole marketplace, hardware-free
+
+No GPU, no Docker, no Lightning node. Invoices auto-settle; the billing period is
+compressed only in the acceptance test (here it's the default 60s, but the mock
+settles deposits immediately).
+
+**Terminal 1 — the server:**
+```bash
+LN_BACKEND=mock MOCK_SETTLE_SECS=0 target/release/control-plane   # binds 127.0.0.1:8080
+```
+
+**Terminal 2 — register a host** (the DGX would run `vgpu-agent`; for a laptop
+demo you can register directly):
+```bash
+curl -s -XPOST localhost:8080/agent/register -H content-type:application/json -d '{
+  "host_id":"box-1","gpu_name":"NVIDIA GeForce RTX 4090","gpu_count":1,"vram_mb":24564,
+  "cpu_name":"Ryzen 9","cpu_cores":16,"ram_mb":64000,"disk_gb":2000,"disk_type":"nvme",
+  "public_ip":"203.0.113.9","port_start":40000,"port_end":40099,
+  "dlperf":42.0,"rate_sats_per_min":6,"hw_fingerprint":"fp-1"}'
+```
+
+**Terminal 2 — drive it as a tenant** (`vgpu` talks to the tenant API):
+```bash
+export VGPU_CONTROL_PLANE=http://localhost:8080
+vgpu offers                                   # the machine is listed
+ACCT=$(vgpu create-account | sed -n 's/^Created account: //p')
+vgpu deposit "$ACCT" 6000                      # get a (mock) invoice; settles on the next tick
+sleep 6
+vgpu account "$ACCT"                            # balance credited
+vgpu rent --machine-id 1 --account-id "$ACCT" \
+  --image nvidia/cuda:12.4.1-runtime --ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
+vgpu rental 1                                  # status + derived `ssh …` command
+vgpu stop 1
+```
+
+`vgpu --help` lists every command. All money is integer satoshis; the CLI shows a
+BTC/USD hint (~$100k/BTC).
+
+## Running a real GPU host (Linux + NVIDIA)
+
+On the DGX (or any NVIDIA Linux box with Docker + the NVIDIA Container Toolkit),
+run the agent pointing at your server. It NVML-inventories the GPUs, benchmarks,
+`POST /agent/register`s (the offer appears), then heartbeats and runs containers:
+
+```bash
+vgpu-agent \
+  --control-plane http://<SERVER_IP>:8080 \
+  --public-ip <HOST_PUBLIC_IP> \
+  --rate-sats-per-min 60 \
+  --port-start 40000 --port-end 40099
+```
+
+Control traffic is agent-initiated, so the host only needs outbound access to the
+server; tenants reach `port_start..port_end` at `public_ip` for SSH.
+
+## Apple Silicon
+
+The **same `vgpu-agent` binary** runs on macOS behind a `HostRuntime` trait: it
+inventories via Metal/`system_profiler`, benchmarks, and registers (a Mac shows
+up in `vgpu offers` as e.g. `Apple M4 Max`). It **cannot lend compute yet** — there
+is no container-GPU passthrough or microVM isolation on macOS, so a rental attempt
+is refused and reported `failed`. See `crates/host-agent/src/runtime.rs`.
+
+## gpu-bench (standalone)
+
+Runs on any GPU via `wgpu` (Metal / Vulkan / DX12) — independent of the marketplace:
+
+```bash
+gpu-bench list                 # enumerate GPUs
+gpu-bench run                  # fp32 + fp16 GEMM + memory bandwidth + a provisional compute index
+gpu-bench run --network        # also probe internet down/up/latency (outbound HTTPS)
+gpu-bench run --json           # machine-readable
+```
+
+## Development
+
+```bash
+cargo test --workspace         # 33 tests incl. the SPEC §10 acceptance test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+cargo audit                    # clean (see .cargo/audit.toml for one accepted, unused-dep advisory)
+```
+
+Run the acceptance test after any change to billing, accounting, or the rental
+state machine.
+
+## Layout
+
+```
+crates/core            shared types (package `vgpu-core`): Sats, enums, API DTOs
+crates/control-plane   axum server + sqlx/sqlite; migrations; billing ticker; tests/lifecycle.rs
+crates/host-agent      vgpu-agent: benchmark.rs (inventory) + runtime.rs (HostRuntime: Docker/Mac)
+crates/gpu-bench       standalone GPU benchmark (lib + CLI)
+crates/vgpu            tenant CLI
+docs/SPEC.md           normative behaviour spec
+docs/BACKGROUND.md     design rationale
+```
+
+## Trust model (deliberate POC gaps)
+
+Custodial balances, POC-grade bearer auth, Docker (not a microVM) for isolation,
+the host can read tenant memory, and a single benchmark at registration. These are
+scoped-out and interacting — see [SPEC §8](docs/SPEC.md) before "fixing" one. The
+roadmap (SPEC §9) is led by **randomized re-benchmarking**, not isolation.
+
+## License
+
+MIT.
