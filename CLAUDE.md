@@ -62,7 +62,7 @@ crates/
     src/runtime.rs         HostRuntime trait: Docker (Linux) + Mac backends
     src/benchmark.rs       NVML (Linux) / Metal (macOS) inventory, dlperf, fingerprint
   gpu-bench/               binary + lib: standalone vendor-agnostic GPU benchmark
-                           (wgpu fp32/fp16 GEMM + bandwidth + network + index).
+                           (fp32/fp16 GEMM + bandwidth + network).
                            Isolated from the marketplace; the agent can consume
                            it to derive dlperf later.
   vgpu/                    binary: tenant CLI (BTC/USD formatting lives here)
@@ -218,11 +218,18 @@ gpu-bench run                             # real measured GPU numbers on that ho
 - **`register` marks the machine online** with a fresh heartbeat, so a freshly
   registered host lists in `/offers` immediately (SPEC §10 step 2).
 - **`gpu-bench` crate added** — a standalone GPU benchmark behind a `Backend`
-  trait: `wgpu` (portable, default), `metal` (native Metal `simdgroup_matrix`,
-  Apple matrix units, macOS-only, via `objc2-metal`), and cuBLAS
-  (`--features cuda`, NVIDIA-host only, not compile-checked here). The fp16 GEMM
-  in `host-agent/src/benchmark.rs` is still the SPEC §6 name-lookup fallback;
-  real measurement lives in `gpu-bench`.
+  trait: `wgpu` (portable), `metal` (native Metal `simdgroup_matrix`, Apple
+  matrix units, macOS-only, via `objc2-metal`), and cuBLAS (`--features cuda`,
+  NVIDIA-host only, not compile-checked here). `run` defaults to `--backend
+  auto`: it resolves to the best native backend compiled in (cuBLAS > native
+  Metal > wgpu, falling back to wgpu if the native one won't initialize) and,
+  when it lands on a native peak backend, *also* measures the portable wgpu path
+  and prints both as columns — the portable number is the cross-vendor ranking
+  metric, so it isn't hidden. An explicit `--backend X` measures only X. `-v`
+  reveals the resolved-backend line and the explanatory note (default output is
+  just the table + a framed network box). The fp16 GEMM in
+  `host-agent/src/benchmark.rs` is still the SPEC §6 name-lookup fallback; real
+  measurement lives in `gpu-bench`.
 - **Host agent is two-platform** behind a `HostRuntime` trait chosen by target
   OS: Linux = Docker + NVML (the real host tier); macOS = Metal/`system_profiler`
   inventory + a **native Metal** runtime (`mac`) — Rust-only, **no Python, no

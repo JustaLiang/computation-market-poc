@@ -134,17 +134,22 @@ marketplace:
 
 ```bash
 gpu-bench list                 # enumerate GPUs
-gpu-bench run                  # fp32 + fp16 GEMM + memory bandwidth + network (all default)
-gpu-bench run --backend metal  # peak Apple numbers, native Metal (macOS)
+gpu-bench run                  # auto: native peak + portable wgpu, side by side
+gpu-bench run --backend wgpu   # force portable wgpu only (apples-to-apples)
+gpu-bench run -v               # + resolved-backend line and explanatory note
 gpu-bench run --json           # machine-readable
 gpu-bench net                  # network-only probe (down/up/latency)
 ```
 
-Backends (behind a `Backend` trait): **wgpu** (portable Metal/Vulkan/DX12 — ALU
-throughput, the default), **metal** (native `simdgroup_matrix` on Apple's matrix
-units via `objc2-metal` — pure Rust, no Python/`cmake`; ~3.7 vs ~0.6 TFLOP/s fp16
-on an M4 Max; macOS only), and **cuBLAS** (`--backend cuda`, built with
-`--features cuda` on an NVIDIA host).
+`run` defaults to `--backend auto`: it picks the best native backend compiled in
+(cuBLAS > native Metal > wgpu) and, on a native backend, *also* measures the
+portable wgpu path and prints both columns — the portable number is the
+cross-vendor ranking metric. An explicit `--backend X` measures only X. Backends
+(behind a `Backend` trait): **wgpu** (portable Metal/Vulkan/DX12 — ALU
+throughput), **metal** (native `simdgroup_matrix` on Apple's matrix units via
+`objc2-metal` — pure Rust, no Python/`cmake`; ~3.7 vs ~0.6 TFLOP/s fp16 on an M4
+Max; macOS only), and **cuBLAS** (`--backend cuda`, built with `--features cuda`
+on an NVIDIA host).
 
 ## Development
 
