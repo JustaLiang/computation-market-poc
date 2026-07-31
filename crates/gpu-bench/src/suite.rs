@@ -9,7 +9,8 @@ use serde::Serialize;
 use crate::backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, NetworkResult, Precision};
 
 /// What to run. Defaults are a quick, laptop-friendly pass. The network probe is
-/// always part of the suite (best-effort), so it isn't configured here.
+/// best-effort (offline is not fatal) and on by default; `include_network`
+/// lets a multi-backend caller run it just once instead of per backend.
 #[derive(Debug, Clone)]
 pub struct SuiteConfig {
     /// Square matrix dimension for GEMM.
@@ -20,6 +21,10 @@ pub struct SuiteConfig {
     pub bandwidth_elems: u64,
     /// Run the fp16 GEMM in addition to fp32 (skipped if unsupported).
     pub include_fp16: bool,
+    /// Run the network probe. The probe is backend-independent, so a caller that
+    /// benchmarks several backends in one go probes once (primary suite) and sets
+    /// this `false` on the others to avoid redundant network round-trips.
+    pub include_network: bool,
 }
 
 impl Default for SuiteConfig {
@@ -30,6 +35,7 @@ impl Default for SuiteConfig {
             warmup: 10,
             bandwidth_elems: 32_000_000,
             include_fp16: true,
+            include_network: true,
         }
     }
 }
@@ -85,14 +91,19 @@ pub fn run_suite(
         }
     };
 
-    // Network is always part of the suite (best-effort — offline is not fatal).
-    on_phase("network probe");
-    let network = match crate::network::probe(&crate::network::NetConfig::default()) {
-        Ok(n) => Some(n),
-        Err(e) => {
-            eprintln!("note: network probe skipped ({e})");
-            None
+    // Network probe: best-effort (offline is not fatal), and skippable so a
+    // multi-backend caller probes only once.
+    let network = if cfg.include_network {
+        on_phase("network probe");
+        match crate::network::probe(&crate::network::NetConfig::default()) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                eprintln!("note: network probe skipped ({e})");
+                None
+            }
         }
+    } else {
+        None
     };
 
     Ok(Report {
