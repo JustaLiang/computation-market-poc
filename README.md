@@ -136,14 +136,21 @@ tier, or the matching `curl` for an MLX endpoint. See
 
 ## gpu-bench (standalone)
 
-Runs on any GPU via `wgpu` (Metal / Vulkan / DX12) — independent of the marketplace:
+A vendor-agnostic GPU benchmark behind a `Backend` trait — independent of the
+marketplace:
 
 ```bash
 gpu-bench list                 # enumerate GPUs
 gpu-bench run                  # fp32 + fp16 GEMM + memory bandwidth + network (all default)
+gpu-bench run --backend mlx    # peak Apple numbers via MLX (needs a Python with `mlx`)
 gpu-bench run --json           # machine-readable
 gpu-bench net                  # network-only probe (down/up/latency)
 ```
+
+Backends: **wgpu** (portable Metal/Vulkan/DX12 — ALU throughput, the default),
+**mlx** (Apple's matrix hardware — near-peak; ~13 vs ~0.6 TFLOP/s fp16 on an M4
+Max), and **cuBLAS** (`--backend cuda`, built with `--features cuda` on an NVIDIA
+host).
 
 ## Development
 

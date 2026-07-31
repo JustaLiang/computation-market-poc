@@ -3,6 +3,7 @@
 //! ```text
 //! gpu-bench list                     # enumerate visible GPUs
 //! gpu-bench run                      # full suite (GEMM + bandwidth + network)
+//! gpu-bench run --backend mlx        # peak Apple numbers (needs a Python with mlx)
 //! gpu-bench run --n 4096 --json      # bigger matmul, machine-readable output
 //! gpu-bench run --skip-fp16          # fp32 GEMM + bandwidth only
 //! ```
@@ -10,11 +11,13 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use comfy_table::{Cell, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use gpu_bench::{probe_network, run_suite, NetConfig, SuiteConfig, WgpuBackend};
+use gpu_bench::{
+    probe_network, run_suite, Backend, MlxBackend, NetConfig, SuiteConfig, WgpuBackend,
+};
 
 #[derive(Parser)]
 #[command(name = "gpu-bench", version, about = "Vendor-agnostic GPU benchmark")]
@@ -53,12 +56,44 @@ struct RunArgs {
     /// Bandwidth test size, in millions of f32 elements per buffer.
     #[arg(long, default_value_t = 32)]
     bandwidth_m: u64,
+    /// Which backend to benchmark.
+    #[arg(long, value_enum, default_value_t = BackendChoice::Wgpu)]
+    backend: BackendChoice,
     /// Skip the fp16 GEMM (run fp32 + bandwidth only).
     #[arg(long)]
     skip_fp16: bool,
     /// Emit JSON instead of tables.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BackendChoice {
+    /// Portable wgpu (Metal/Vulkan/DX12) — ALU throughput, works everywhere.
+    Wgpu,
+    /// Apple MLX — peak Apple-GPU numbers (needs a Python with `mlx`).
+    Mlx,
+    /// NVIDIA cuBLAS — peak on an NVIDIA host (build with `--features cuda`).
+    Cuda,
+}
+
+fn make_backend(choice: BackendChoice) -> anyhow::Result<Box<dyn Backend>> {
+    match choice {
+        BackendChoice::Wgpu => Ok(Box::new(WgpuBackend::new()?)),
+        BackendChoice::Mlx => Ok(Box::new(MlxBackend::new()?)),
+        BackendChoice::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                Ok(Box::new(gpu_bench::CudaBackend::new()?))
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                anyhow::bail!(
+                    "cuda backend not built — rebuild with `--features cuda` on an NVIDIA host"
+                )
+            }
+        }
+    }
 }
 
 #[derive(Args)]
@@ -135,7 +170,7 @@ fn list(json: bool) -> anyhow::Result<()> {
 }
 
 fn run(args: RunArgs) -> anyhow::Result<()> {
-    let backend = WgpuBackend::new().context("initializing GPU backend")?;
+    let backend = make_backend(args.backend).context("initializing backend")?;
     let cfg = SuiteConfig {
         n: args.n,
         iters: args.iters,
@@ -151,7 +186,7 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner.set_message("benchmarking…");
 
-    let report = run_suite(&backend, &cfg, |phase| {
+    let report = run_suite(backend.as_ref(), &cfg, |phase| {
         spinner.set_message(format!("benchmarking: {phase}…"))
     })
     .context("running benchmark suite")?;

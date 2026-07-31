@@ -15,15 +15,19 @@ pub mod network;
 pub mod suite;
 pub mod wgpu_backend;
 
-/// Apple/MLX backend, behind the `mlx` feature. Placeholder until `mlx-rs` is
-/// wired up (needs `cmake`); see [`mlx_backend`].
-#[cfg(feature = "mlx")]
+/// Apple/MLX backend (peak numbers via Python MLX). Always compiled; needs a
+/// Python with `mlx` at runtime (`VGPU_MLX_PYTHON`).
 pub mod mlx_backend;
 
+/// cuBLAS backend, behind the `cuda` feature — runs on an NVIDIA host.
+#[cfg(feature = "cuda")]
+pub mod cuda_backend;
+
 pub use backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, NetworkResult, Precision};
+pub use mlx_backend::MlxBackend;
 pub use network::{probe as probe_network, NetConfig};
 pub use suite::{run_suite, Report, SuiteConfig};
 pub use wgpu_backend::WgpuBackend;
 
-#[cfg(feature = "mlx")]
-pub use mlx_backend::MlxBackend;
+#[cfg(feature = "cuda")]
+pub use cuda_backend::CudaBackend;

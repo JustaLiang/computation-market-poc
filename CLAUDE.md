@@ -217,9 +217,11 @@ gpu-bench run                             # real measured GPU numbers on that ho
   test advances time deterministically instead of sleeping.
 - **`register` marks the machine online** with a fresh heartbeat, so a freshly
   registered host lists in `/offers` immediately (SPEC §10 step 2).
-- **`gpu-bench` crate added** — a standalone GPU benchmark, isolated from the
-  marketplace. The fp16 GEMM in `host-agent/src/benchmark.rs` is still the SPEC §6
-  name-lookup fallback; real measurement lives in `gpu-bench` (or a CUDA build).
+- **`gpu-bench` crate added** — a standalone GPU benchmark behind a `Backend`
+  trait: `wgpu` (portable, default), `mlx` (Apple peak, via a Python with `mlx`),
+  and cuBLAS (`--features cuda`, NVIDIA-host only, not compile-checked here). The
+  fp16 GEMM in `host-agent/src/benchmark.rs` is still the SPEC §6 name-lookup
+  fallback; real measurement lives in `gpu-bench`.
 - **Host agent is two-platform** behind a `HostRuntime` trait chosen by target
   OS: Linux = Docker + NVML (the real host tier); macOS = Metal/`system_profiler`
   inventory + an **MLX-only** runtime — the host runs an allowlisted,

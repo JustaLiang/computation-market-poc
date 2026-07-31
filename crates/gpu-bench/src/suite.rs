@@ -47,9 +47,9 @@ pub struct Report {
 
 /// Run fp32 GEMM, optionally fp16 GEMM, memory bandwidth, and a network probe.
 ///
-/// fp32 GEMM and bandwidth are required (an error fails the suite). fp16 and the
+/// fp32 GEMM is required (an error fails the suite). fp16, bandwidth, and the
 /// network probe are best-effort: on failure they are recorded as `None` and
-/// noted, not fatal.
+/// noted, not fatal (e.g. the cuBLAS backend measures GEMM only).
 ///
 /// `on_phase` is called with a short label before each (blocking) phase, so a
 /// caller can drive a spinner. Pass `|_| {}` if you don't care.
@@ -77,7 +77,13 @@ pub fn run_suite(
     };
 
     on_phase("memory bandwidth");
-    let bandwidth = Some(backend.bandwidth(cfg.bandwidth_elems, cfg.warmup, cfg.iters)?);
+    let bandwidth = match backend.bandwidth(cfg.bandwidth_elems, cfg.warmup, cfg.iters) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!("note: bandwidth skipped ({e})");
+            None
+        }
+    };
 
     // Network is always part of the suite (best-effort — offline is not fatal).
     on_phase("network probe");
