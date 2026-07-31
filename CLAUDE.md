@@ -222,11 +222,11 @@ gpu-bench run                             # real measured GPU numbers on that ho
   name-lookup fallback; real measurement lives in `gpu-bench` (or a CUDA build).
 - **Host agent is two-platform** behind a `HostRuntime` trait chosen by target
   OS: Linux = Docker + NVML (the real host tier); macOS = Metal/`system_profiler`
-  inventory + a runtime **stub** that registers and benchmarks but refuses to
-  launch (Apple Silicon has no container-GPU passthrough or microVM). Same
-  `vgpu-agent` binary, flags, and protocol — only `benchmark.rs`/`runtime.rs`
-  differ. A Mac appears in `/offers`; renting it reports `failed` with the
-  isolation reason.
+  inventory + an **MLX-only** runtime — the host runs an allowlisted,
+  host-controlled MLX fp16 GEMM job (image `mlx:gemm[:N]`), never tenant code, as
+  the isolation model in lieu of a microVM (needs a Python with `mlx`, via
+  `VGPU_MLX_PYTHON`). Same `vgpu-agent` binary, flags, and protocol — only
+  `benchmark.rs`/`runtime.rs` differ.
 
 ## Deliberate gaps
 

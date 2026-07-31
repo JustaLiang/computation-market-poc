@@ -1,7 +1,7 @@
 # computation-market-poc
 
-A vast.ai-shaped **GPU rental marketplace** with **Bitcoin/Lightning** payments,
-in Rust. Providers list a GPU host and set one price in sats/min; tenants deposit
+A **GPU rental marketplace** with **Bitcoin/Lightning** payments, in Rust.
+Providers list a GPU host and set one price in sats/min; tenants deposit
 over Lightning, rent by the minute (billed in advance), and are evicted at zero
 balance. The control plane is a rendezvous + accounting service — **not** a proxy;
 workload traffic (SSH) goes straight to the host.
@@ -98,13 +98,29 @@ vgpu-agent \
 Control traffic is agent-initiated, so the host only needs outbound access to the
 server; tenants reach `port_start..port_end` at `public_ip` for SSH.
 
-## Apple Silicon
+## Apple Silicon (MLX-only tier)
 
 The **same `vgpu-agent` binary** runs on macOS behind a `HostRuntime` trait: it
-inventories via Metal/`system_profiler`, benchmarks, and registers (a Mac shows
-up in `vgpu offers` as e.g. `Apple M4 Max`). It **cannot lend compute yet** — there
-is no container-GPU passthrough or microVM isolation on macOS, so a rental attempt
-is refused and reported `failed`. See `crates/host-agent/src/runtime.rs`.
+inventories via Metal/`system_profiler`, benchmarks, registers (a Mac shows up in
+`vgpu offers` as e.g. `Apple M4 Max`), and lends compute as an **MLX-only** tier.
+The isolation model is an allowlist, not a shell: the tenant supplies only
+*parameters* (the rental image is `mlx:gemm[:N]`), and the host runs a fixed,
+host-controlled MLX fp16 GEMM job on the Apple GPU — never tenant code — exposing
+a status endpoint with live throughput.
+
+Needs a Python with `mlx`:
+
+```bash
+python3 -m venv .mlx && .mlx/bin/pip install mlx
+VGPU_MLX_PYTHON="$PWD/.mlx/bin/python" vgpu-agent \
+  --control-plane http://<server>:8080 --public-ip <ip> --rate-sats-per-min 3
+# tenant:
+vgpu rent --machine-id <id> --account-id <acct> --image mlx:gemm:2048 --ssh-key unused
+curl http://<host>:<port>/        # {"task":"gemm-fp16","tflops": …} — live
+```
+
+Arbitrary containers + SSH are the Linux tier; on macOS a non-`mlx:` image is
+rejected. See `crates/host-agent/src/runtime.rs`.
 
 ## gpu-bench (standalone)
 
