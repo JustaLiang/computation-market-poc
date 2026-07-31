@@ -15,19 +15,21 @@ pub mod network;
 pub mod suite;
 pub mod wgpu_backend;
 
-/// Apple/MLX backend (peak numbers via Python MLX). Always compiled; needs a
-/// Python with `mlx` at runtime (`VGPU_MLX_PYTHON`).
-pub mod mlx_backend;
+/// Native Apple-GPU backend (Metal + `simdgroup_matrix`) — peak, macOS-only.
+#[cfg(target_os = "macos")]
+pub mod metal_backend;
 
 /// cuBLAS backend, behind the `cuda` feature — runs on an NVIDIA host.
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 
 pub use backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, NetworkResult, Precision};
-pub use mlx_backend::MlxBackend;
 pub use network::{probe as probe_network, NetConfig};
 pub use suite::{run_suite, Report, SuiteConfig};
 pub use wgpu_backend::WgpuBackend;
+
+#[cfg(target_os = "macos")]
+pub use metal_backend::MetalBackend;
 
 #[cfg(feature = "cuda")]
 pub use cuda_backend::CudaBackend;

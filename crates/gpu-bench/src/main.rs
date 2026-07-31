@@ -3,7 +3,7 @@
 //! ```text
 //! gpu-bench list                     # enumerate visible GPUs
 //! gpu-bench run                      # full suite (GEMM + bandwidth + network)
-//! gpu-bench run --backend mlx        # peak Apple numbers (needs a Python with mlx)
+//! gpu-bench run --backend metal      # peak Apple numbers (native Metal, macOS)
 //! gpu-bench run --n 4096 --json      # bigger matmul, machine-readable output
 //! gpu-bench run --skip-fp16          # fp32 GEMM + bandwidth only
 //! ```
@@ -15,9 +15,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use comfy_table::{Cell, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use gpu_bench::{
-    probe_network, run_suite, Backend, MlxBackend, NetConfig, SuiteConfig, WgpuBackend,
-};
+use gpu_bench::{probe_network, run_suite, Backend, NetConfig, SuiteConfig, WgpuBackend};
 
 #[derive(Parser)]
 #[command(name = "gpu-bench", version, about = "Vendor-agnostic GPU benchmark")]
@@ -71,8 +69,8 @@ struct RunArgs {
 enum BackendChoice {
     /// Portable wgpu (Metal/Vulkan/DX12) — ALU throughput, works everywhere.
     Wgpu,
-    /// Apple MLX — peak Apple-GPU numbers (needs a Python with `mlx`).
-    Mlx,
+    /// Native Metal `simdgroup_matrix` — peak Apple-GPU numbers (macOS only).
+    Metal,
     /// NVIDIA cuBLAS — peak on an NVIDIA host (build with `--features cuda`).
     Cuda,
 }
@@ -80,7 +78,16 @@ enum BackendChoice {
 fn make_backend(choice: BackendChoice) -> anyhow::Result<Box<dyn Backend>> {
     match choice {
         BackendChoice::Wgpu => Ok(Box::new(WgpuBackend::new()?)),
-        BackendChoice::Mlx => Ok(Box::new(MlxBackend::new()?)),
+        BackendChoice::Metal => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(Box::new(gpu_bench::MetalBackend::new()?))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                anyhow::bail!("the metal backend is macOS-only")
+            }
+        }
         BackendChoice::Cuda => {
             #[cfg(feature = "cuda")]
             {
@@ -268,8 +275,16 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
     };
 
     println!("{table}");
-    println!(
-        "\nNote: portable ALU throughput (no tensor cores) — good for ranking, below vendor peak."
-    );
+    let note = match args.backend {
+        BackendChoice::Wgpu => {
+            "portable ALU throughput (no tensor cores) — good for ranking, below vendor peak."
+        }
+        BackendChoice::Metal => {
+            "native Metal simdgroup_matrix (Apple matrix units) — a basic kernel: \
+             above the portable path, below a fully-tuned library."
+        }
+        BackendChoice::Cuda => "cuBLAS on NVIDIA tensor cores.",
+    };
+    println!("\nNote: {note}");
     Ok(())
 }
