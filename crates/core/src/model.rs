@@ -76,6 +76,23 @@ pub enum DiskType {
     Unknown,
 }
 
+/// How a tenant connects to a running rental — the agent reports it, and clients
+/// render the right hint (SSH box vs HTTP endpoint). Defaults to `Ssh`, the
+/// container tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
+#[serde(rename_all = "snake_case")]
+pub enum RentalKind {
+    /// An SSH box (the container tier): `ssh -p <port> <user>@<host>`.
+    #[default]
+    Ssh,
+    /// A plain HTTP status/metrics endpoint: `GET http://<host>:<port>/`.
+    HttpStatus,
+    /// An OpenAI-compatible HTTP inference API at `/v1/...`.
+    HttpOpenai,
+}
+
 /// Kind of a ledger entry (SPEC §3, `ledger.kind`). The append-only audit trail
 /// is double-entry: `SUM(delta_sats) == 0` across the whole table, always.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

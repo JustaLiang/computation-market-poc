@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{DiskType, RentalStatus};
+use crate::model::{DiskType, RentalKind, RentalStatus};
 
 /// Body of `POST /agent/register` (SPEC §7).
 ///
@@ -101,6 +101,9 @@ pub enum Command {
 pub struct ReportRequest {
     pub rental_id: i64,
     pub status: RentalStatus,
+    /// How the tenant connects (set on the `running` report). Absent → unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<RentalKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_port: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +227,9 @@ pub struct RentalResponse {
     pub account_id: String,
     pub image: String,
     pub status: RentalStatus,
+    /// Connection kind; drives the endpoint hint a client shows.
+    #[serde(default)]
+    pub kind: RentalKind,
     pub gpu_name: String,
     pub gpu_count: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +287,7 @@ mod tests {
         let r = ReportRequest {
             rental_id: 3,
             status: RentalStatus::Failed,
+            kind: None,
             ssh_port: None,
             container_id: None,
             error: Some("image pull failed".into()),

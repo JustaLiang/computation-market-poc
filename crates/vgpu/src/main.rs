@@ -17,6 +17,7 @@ use vgpu_core::api::{
     AccountResponse, CreateAccountResponse, CreateRentalRequest, CreateRentalResponse,
     DepositRequest, DepositResponse, HealthResponse, OffersResponse, RentalResponse,
 };
+use vgpu_core::model::RentalKind;
 
 #[derive(Parser)]
 #[command(
@@ -179,6 +180,27 @@ fn value(rate_sats_per_min: i64, dlperf: f64) -> f64 {
     rate_sats_per_min as f64 / dlperf.max(0.01)
 }
 
+/// The connection hint for a rental, by kind — `(label, command)` — or `None`
+/// until the host and port are known.
+fn endpoint_hint(
+    kind: RentalKind,
+    host: Option<&str>,
+    port: Option<i32>,
+) -> Option<(&'static str, String)> {
+    let (host, port) = (host?, port?);
+    Some(match kind {
+        RentalKind::Ssh => ("SSH:", format!("ssh -p {port} root@{host}")),
+        RentalKind::HttpStatus => ("Status:", format!("curl http://{host}:{port}/")),
+        RentalKind::HttpOpenai => (
+            "LLM API:",
+            format!(
+                "curl http://{host}:{port}/v1/chat/completions -H content-type:application/json \
+                 -d '{{\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}],\"max_tokens\":64}}'"
+            ),
+        ),
+    })
+}
+
 // --- command handlers -----------------------------------------------------
 
 fn health(client: &Client) -> anyhow::Result<()> {
@@ -315,9 +337,9 @@ fn rental(client: &Client, id: i64) -> anyhow::Result<()> {
     println!("Rental {}  [{}]", r.id, r.status.as_str());
     println!("  GPU:     {} x{}", r.gpu_name, r.gpu_count);
     println!("  Image:   {}", r.image);
-    match &r.ssh_command {
-        Some(cmd) => println!("  SSH:     {cmd}"),
-        None => println!("  SSH:     (pending — not running yet)"),
+    match endpoint_hint(r.kind, r.ssh_host.as_deref(), r.ssh_port) {
+        Some((label, hint)) => println!("  {label:<8} {hint}"),
+        None => println!("  {:<8} (pending — not running yet)", "Endpoint:"),
     }
     println!(
         "  Billed:  {} sats over {} min",

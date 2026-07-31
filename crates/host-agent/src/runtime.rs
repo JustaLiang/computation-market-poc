@@ -16,6 +16,7 @@
 //! No `bollard` type appears outside the `docker` module (CLAUDE.md).
 
 use async_trait::async_trait;
+use vgpu_core::model::RentalKind;
 
 /// What to launch. A control-plane `start_rental` command maps onto this.
 ///
@@ -33,8 +34,11 @@ pub struct RentalSpec {
 /// Result of a successful launch, reported back to the control plane.
 pub struct Started {
     pub container_id: String,
-    /// Host-side port, reachable at the machine's `public_ip`, mapped to SSH.
+    /// Host-side port, reachable at the machine's `public_ip`. SSH for the
+    /// container tier; an HTTP endpoint for MLX jobs (see `kind`).
     pub ssh_port: i32,
+    /// How a tenant connects — drives the client's endpoint hint.
+    pub kind: RentalKind,
 }
 
 /// A workload this agent currently has running, recovered on startup.
@@ -129,7 +133,7 @@ mod docker {
     use futures_util::StreamExt;
 
     use super::{container_name, pick_free_port, split_image_tag};
-    use super::{HostRuntime, RentalSpec, RunningRental, Started};
+    use super::{HostRuntime, RentalKind, RentalSpec, RunningRental, Started};
 
     /// Labels we stamp on our containers so the agent can find and account for
     /// them across its own restarts — the container list is the source of truth
@@ -291,6 +295,7 @@ mod docker {
             Ok(Started {
                 container_id: created.id,
                 ssh_port,
+                kind: RentalKind::Ssh,
             })
         }
 
@@ -389,7 +394,7 @@ mod mac {
     use anyhow::Context;
     use async_trait::async_trait;
 
-    use super::{pick_free_port, HostRuntime, RentalSpec, RunningRental, Started};
+    use super::{pick_free_port, HostRuntime, RentalKind, RentalSpec, RunningRental, Started};
 
     /// An allowlisted, host-controlled MLX task. The tenant supplies only
     /// *parameters* (via the rental image), never code — that bounded surface is
@@ -612,6 +617,11 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
                 ),
             }
 
+            let kind = match &task {
+                MlxTask::Gemm { .. } => RentalKind::HttpStatus,
+                MlxTask::Generate { .. } => RentalKind::HttpOpenai,
+            };
+
             let used = self.used_ports();
             let port = pick_free_port(self.port_start, self.port_end, &used).ok_or_else(|| {
                 anyhow::anyhow!("no free port in {}..={}", self.port_start, self.port_end)
@@ -632,6 +642,7 @@ HTTPServer(("0.0.0.0", port), H).serve_forever()
             Ok(Started {
                 container_id: format!("mlx-job-{}", spec.rental_id),
                 ssh_port: port, // gemm: status endpoint; generate: OpenAI API
+                kind,
             })
         }
 

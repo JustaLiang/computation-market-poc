@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{Sqlite, SqliteConnection};
-use vgpu_core::model::{DiskType, LedgerKind, RentalStatus};
+use vgpu_core::model::{DiskType, LedgerKind, RentalKind, RentalStatus};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -94,6 +94,7 @@ pub struct RentalRow {
     pub image: String,
     pub ssh_pubkey: String,
     pub status: RentalStatus,
+    pub kind: RentalKind,
     pub ssh_host: Option<String>,
     pub ssh_port: Option<i64>,
     pub container_id: Option<String>,

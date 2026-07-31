@@ -185,10 +185,11 @@ pub async fn report(
     let ended_at: Option<i64> = req.status.is_terminal().then_some(now);
 
     sqlx::query(
-        "UPDATE rentals SET status=?, ssh_host=?, ssh_port=?, container_id=COALESCE(?, container_id), \
-         error=?, ended_at=COALESCE(?, ended_at) WHERE id=?",
+        "UPDATE rentals SET status=?, kind=COALESCE(?, kind), ssh_host=?, ssh_port=?, \
+         container_id=COALESCE(?, container_id), error=?, ended_at=COALESCE(?, ended_at) WHERE id=?",
     )
     .bind(req.status)
+    .bind(req.kind)
     .bind(machine.public_ip.as_str())
     .bind(req.ssh_port)
     .bind(req.container_id.as_deref())

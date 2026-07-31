@@ -8,7 +8,7 @@ use vgpu_core::api::{
     AccountResponse, Command, CreateAccountResponse, CreateRentalRequest, CreateRentalResponse,
     DepositRequest, DepositResponse, HealthResponse, Offer, OffersResponse, RentalResponse,
 };
-use vgpu_core::model::RentalStatus;
+use vgpu_core::model::{RentalKind, RentalStatus};
 use vgpu_core::Sats;
 
 use crate::db::{self, AccountRow, MachineRow, RentalRow};
@@ -337,8 +337,10 @@ pub async fn get_rental(
             .fetch_one(&state.pool)
             .await?;
 
-    let ssh_command = match (&r.ssh_host, r.ssh_port) {
-        (Some(host), Some(port)) => Some(format!("ssh -p {port} root@{host}")),
+    // `ssh_command` is meaningful only for the SSH (container) tier; HTTP-kind
+    // rentals get their hint rendered by the client from `kind` + host/port.
+    let ssh_command = match (r.kind, &r.ssh_host, r.ssh_port) {
+        (RentalKind::Ssh, Some(host), Some(port)) => Some(format!("ssh -p {port} root@{host}")),
         _ => None,
     };
 
@@ -348,6 +350,7 @@ pub async fn get_rental(
         account_id: r.account_id,
         image: r.image,
         status: r.status,
+        kind: r.kind,
         gpu_name,
         gpu_count: gpu_count as i32,
         ssh_host: r.ssh_host,

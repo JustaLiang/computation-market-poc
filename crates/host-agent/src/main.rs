@@ -246,6 +246,7 @@ async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<dyn HostRuntime>, cmd: Command)
                     ReportRequest {
                         rental_id,
                         status: RentalStatus::Running,
+                        kind: Some(started.kind),
                         ssh_port: Some(started.ssh_port),
                         container_id: Some(started.container_id),
                         error: None,
@@ -256,6 +257,7 @@ async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<dyn HostRuntime>, cmd: Command)
                     ReportRequest {
                         rental_id,
                         status: RentalStatus::Failed,
+                        kind: None,
                         ssh_port: None,
                         container_id: None,
                         error: Some(format!("{e:#}")),
@@ -269,6 +271,7 @@ async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<dyn HostRuntime>, cmd: Command)
                 ReportRequest {
                     rental_id,
                     status: RentalStatus::Stopped,
+                    kind: None,
                     ssh_port: None,
                     container_id: None,
                     error: None,
@@ -279,6 +282,7 @@ async fn dispatch(cp: Arc<ControlPlane>, rt: Arc<dyn HostRuntime>, cmd: Command)
                 ReportRequest {
                     rental_id,
                     status: RentalStatus::Failed,
+                    kind: None,
                     ssh_port: None,
                     container_id: None,
                     error: Some(format!("{e:#}")),
