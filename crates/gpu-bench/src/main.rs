@@ -257,8 +257,8 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
     let compare_portable = matches!(args.backend, BackendChoice::Auto)
         && !matches!(resolved_backend, BackendChoice::Wgpu);
 
-    // The primary suite owns the (backend-independent) network probe; the
-    // comparison suite skips it, so the network is probed exactly once.
+    // The primary (native) suite owns the (backend-independent) network probe;
+    // the portable comparison suite skips it, so the network is probed once.
     let cfg = SuiteConfig {
         n: args.n,
         iters: args.iters,
@@ -275,11 +275,8 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner.set_message("benchmarking…");
 
-    let report = run_suite(backend.as_ref(), &cfg, |phase| {
-        spinner.set_message(format!("benchmarking: {phase}…"))
-    })
-    .context("running benchmark suite")?;
-
+    // In comparison mode, measure portable wgpu *first*, then the native backend,
+    // so run order matches the table's column order (portable, then native).
     let portable = if compare_portable {
         let (wgpu_backend, _) = make_backend(BackendChoice::Wgpu, args.verbose)?;
         let wgpu_cfg = SuiteConfig {
@@ -295,6 +292,16 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
     } else {
         None
     };
+
+    let native_label = if compare_portable {
+        "benchmarking (native)"
+    } else {
+        "benchmarking"
+    };
+    let report = run_suite(backend.as_ref(), &cfg, |phase| {
+        spinner.set_message(format!("{native_label}: {phase}…"))
+    })
+    .context("running benchmark suite")?;
     spinner.finish_and_clear();
 
     if args.json {
