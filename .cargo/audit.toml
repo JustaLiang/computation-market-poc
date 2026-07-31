@@ -1,0 +1,10 @@
+# cargo-audit configuration.
+#
+# RUSTSEC-2023-0071 (Marvin timing sidechannel in `rsa`) is accepted, not fixed:
+# `rsa` is a transitive dependency of `sqlx-mysql`, which we never compile — sqlx
+# is configured sqlite-only (`default-features = false, features = ["sqlite", …]`).
+# `cargo tree -i rsa` reports "nothing to print", so no RSA code is linked or run.
+# There is also no fixed `rsa` release to upgrade to. Re-evaluate if the sqlx
+# `mysql` feature is ever enabled — then `rsa` would actually be built.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
