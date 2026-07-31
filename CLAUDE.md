@@ -43,7 +43,7 @@ crates/
                            Imported as `vgpu_core`. No I/O; sqlx derives behind
                            the `sqlx` feature so clients stay dependency-light.
     src/money.rs           Sats newtype
-    src/model.rs           RentalStatus, DiskType, LedgerKind (enums)
+    src/model.rs           RentalStatus, RentalKind, DiskType, LedgerKind (enums)
     src/api.rs             request/response DTOs (agent + tenant), shared
   control-plane/           binary + lib (lib so the acceptance test drives it)
     src/lib.rs             build_router()
@@ -228,6 +228,12 @@ gpu-bench run                             # real measured GPU numbers on that ho
   tenant code, as the isolation model in lieu of a microVM (needs a Python with
   `mlx`/`mlx-lm`, via `VGPU_MLX_PYTHON`). Same `vgpu-agent` binary, flags, and
   protocol — only `benchmark.rs`/`runtime.rs` differ.
+- **`RentalKind` extends `RentalResponse`.** SPEC §7 derives only an SSH
+  `ssh_command`; the impl adds a `kind` (`ssh` | `http_status` | `http_openai`)
+  reported by the agent so the tenant CLI shows the right endpoint hint (an SSH
+  box vs a `curl` to an HTTP / OpenAI endpoint). `ssh_command` is still populated
+  for the `ssh` kind; `kind` defaults to `ssh`, so the acceptance test is
+  unchanged.
 
 ## Deliberate gaps
 

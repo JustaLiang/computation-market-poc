@@ -4,7 +4,7 @@ A **GPU rental marketplace** with **Bitcoin/Lightning** payments, in Rust.
 Providers list a GPU host and set one price in sats/min; tenants deposit
 over Lightning, rent by the minute (billed in advance), and are evicted at zero
 balance. The control plane is a rendezvous + accounting service — **not** a proxy;
-workload traffic (SSH) goes straight to the host.
+workload traffic (SSH, or an HTTP endpoint for MLX jobs) goes straight to the host.
 
 Normative behaviour lives in [`docs/SPEC.md`](docs/SPEC.md); the "why" is in
 [`docs/BACKGROUND.md`](docs/BACKGROUND.md).
@@ -129,7 +129,9 @@ curl http://<host>:<port>/v1/chat/completions -H content-type:application/json \
 ```
 
 Arbitrary containers + SSH are the Linux tier; on macOS a non-`mlx:` image is
-rejected. The port is an HTTP endpoint (not SSH). See
+rejected. Each rental carries a **kind** (`ssh` | `http_status` | `http_openai`),
+so `vgpu rental <id>` prints the right hint — an `ssh` command for the container
+tier, or the matching `curl` for an MLX endpoint. See
 `crates/host-agent/src/runtime.rs`.
 
 ## gpu-bench (standalone)
@@ -146,7 +148,7 @@ gpu-bench run --json           # machine-readable
 ## Development
 
 ```bash
-cargo test --workspace         # 33 tests incl. the SPEC §10 acceptance test
+cargo test --workspace         # 38 tests incl. the SPEC §10 acceptance test
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo audit                    # clean (see .cargo/audit.toml for one accepted, unused-dep advisory)
