@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! gpu-bench list                     # enumerate visible GPUs
-//! gpu-bench run                      # full suite (fp32 + fp16 GEMM + bandwidth)
+//! gpu-bench run                      # full suite (GEMM + bandwidth + network)
 //! gpu-bench run --n 4096 --json      # bigger matmul, machine-readable output
 //! gpu-bench run --skip-fp16          # fp32 GEMM + bandwidth only
 //! ```
@@ -53,9 +53,6 @@ struct RunArgs {
     /// Skip the fp16 GEMM (run fp32 + bandwidth only).
     #[arg(long)]
     skip_fp16: bool,
-    /// Also probe the network (outbound HTTPS) and fold it into the index.
-    #[arg(long)]
-    network: bool,
     /// Emit JSON instead of tables.
     #[arg(long)]
     json: bool,
@@ -142,7 +139,6 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
         warmup: args.warmup,
         bandwidth_elems: args.bandwidth_m * 1_000_000,
         include_fp16: !args.skip_fp16,
-        include_network: args.network,
     };
     let report = run_suite(&backend, &cfg).context("running benchmark suite")?;
 
@@ -216,24 +212,14 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
         ]),
         None => table.add_row(vec![
             Cell::new("Network"),
-            Cell::new("reserved"),
-            Cell::new("not measured; pass --network to include"),
+            Cell::new("n/a"),
+            Cell::new("probe failed (offline?)"),
         ]),
     };
 
-    table.add_row(vec![
-        Cell::new("Compute index"),
-        Cell::new(format!("{:.1}", report.index.score)),
-        Cell::new(format!(
-            "compute {:.1} · memory {:.1} ({})",
-            report.index.compute_component, report.index.memory_component, report.index.note
-        )),
-    ]);
-
     println!("{table}");
     println!(
-        "\nNote: portable ALU throughput (no tensor cores) — good for ranking, below vendor peak.\
-         \n      Compute index is a provisional v0; references are placeholders, not calibrated."
+        "\nNote: portable ALU throughput (no tensor cores) — good for ranking, below vendor peak."
     );
     Ok(())
 }

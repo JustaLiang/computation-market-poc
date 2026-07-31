@@ -22,7 +22,7 @@ pub mod mlx_backend;
 
 pub use backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, NetworkResult, Precision};
 pub use network::{probe as probe_network, NetConfig};
-pub use suite::{run_suite, ComputeIndex, Report, SuiteConfig};
+pub use suite::{run_suite, Report, SuiteConfig};
 pub use wgpu_backend::WgpuBackend;
 
 #[cfg(feature = "mlx")]

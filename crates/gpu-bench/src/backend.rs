@@ -73,12 +73,11 @@ pub struct BandwidthResult {
     pub gb_per_s: f64,
 }
 
-/// Result of a network throughput/latency probe.
+/// Result of a network throughput/latency probe (see [`crate::network`]).
 ///
-/// Reserved: not measured yet. It exists so the [`crate::suite::Report`] and the
-/// compute index already have a typed slot for network, which the SPEC's future
-/// "computation index" is meant to fold in. Measuring it needs a cooperating
-/// peer/server (iperf-style), which is out of scope for a local benchmark.
+/// Measured against a public speedtest peer and reported as part of every suite
+/// run — the same signal the marketplace's `inet_down_mbps` / `inet_up_mbps` host
+/// fields care about.
 #[derive(Debug, Clone, Serialize)]
 pub struct NetworkResult {
     pub down_mbps: f64,

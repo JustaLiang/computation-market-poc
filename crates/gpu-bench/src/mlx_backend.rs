@@ -11,7 +11,7 @@
 //!   1. add `mlx-rs` as an optional dependency; set `mlx = ["dep:mlx-rs"]`,
 //!   2. build f16 arrays and loop `matmul` + `eval` (MLX is lazy) to time GEMM,
 //!   3. return the same [`GemmResult`]/[`BandwidthResult`] as the wgpu backend,
-//!      so the suite and compute index consume it unchanged.
+//!      so the suite consumes it unchanged.
 
 use crate::backend::{Backend, BandwidthResult, DeviceInfo, GemmResult, Precision};
 

@@ -140,15 +140,15 @@ Runs on any GPU via `wgpu` (Metal / Vulkan / DX12) — independent of the market
 
 ```bash
 gpu-bench list                 # enumerate GPUs
-gpu-bench run                  # fp32 + fp16 GEMM + memory bandwidth + a provisional compute index
-gpu-bench run --network        # also probe internet down/up/latency (outbound HTTPS)
+gpu-bench run                  # fp32 + fp16 GEMM + memory bandwidth + network (all default)
 gpu-bench run --json           # machine-readable
+gpu-bench net                  # network-only probe (down/up/latency)
 ```
 
 ## Development
 
 ```bash
-cargo test --workspace         # 38 tests incl. the SPEC §10 acceptance test
+cargo test --workspace         # 34 tests incl. the SPEC §10 acceptance test
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo audit                    # clean (see .cargo/audit.toml for one accepted, unused-dep advisory)
