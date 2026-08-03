@@ -285,3 +285,17 @@ requires crossing one of those lines, say so before starting.
 Roadmap and priority order are in SPEC §9. The first item — randomized
 re-benchmarking against each machine's own history — is the highest-value
 addition, not the isolation work.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live in GitHub Issues (`github.com/JustaLiang/computation-market-poc`), driven via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary — `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix` (label string equals role name). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily by `/domain-modeling`). See `docs/agents/domain.md`.
